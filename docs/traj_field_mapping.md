@@ -14,25 +14,27 @@ MapTool 轨迹点自带双坐标（南岸晶都样例实测）：
 
 ### 2.1 直通字段（JSON 字段名 = 任务参数语义，值原样）
 
-| 字段 | 类型 | 语义 | 备注 |
+> **v1.1 修订（2026-11-18，源码实证）**：依据整车源码（`modules/sweep_path/custom_path/msg/TrajectoryAttribute.msg` 13 字段 + `custom_path.cpp` JSON 解析 + `sweep_base.cpp` 消费链）逐一核对。**车载实际消费的字段集与 MapTool JSON 并不一致**，详见 §2.2/§2.3。
+
+**车载 `TrajectoryAttribute.msg` 13 字段（真正被规划/调度消费的集合）：**
+
+| msg 字段 | MapTool JSON 键 | 语义 | 消费方（源码位置） |
 |---|---|---|---|
-| x, y, yaw | float | 轨迹点世界坐标 | 唯一参与规划的几何 |
-| back | 0/1 | 倒车段 | |
-| bypass | 0/1 | 自动绕障 | |
-| charge | 0/1 | 充电点 | |
-| clean_flag | 0/1 | 清扫标志 | |
-| curve_paths | 0/1 | 曲线过渡 | |
-| force_pass | 0/1 | 强制通过（忽略临时障碍） | |
-| ignore_obstacles | 0/1 | 忽略障碍 | |
-| localization_mode | int | 定位模式 | |
-| parking_area | 0/1 | 停车区 | |
-| reverse_traj | 0/1 | 反向轨迹 | |
-| road_id | int | 路段 ID | |
-| road_width | float | 轨迹宽度 | |
-| seismic | 0/1 | 震动 | |
-| trash | 0/1 | 垃圾 | |
-| turnAround | 0/1 | 掉头点 | |
-| bush_cutwidth | float | 灌木修剪宽 | |
+| turnAround | turnAround | 掉头点 | sweep_base → turn_around_flag 话题 |
+| **welt** | ⚠️ **JSON 缺失** | **贴边标记** | sweep_base is_sticking_（special_road 链） |
+| bypass | bypass | 允许绕障 | sweep_base update_point_counts |
+| **seisimic** | seismic（拼写差！） | 震尘 | msg 拼写为 seisimic |
+| trash | trash | 垃圾点 | sweep_base trash_point_count |
+| charge | charge | 充电桩 | sweep_base charge_point_count |
+| road_id | road_id | 路段号/贴边路 | sweep_base special_road_ |
+| back | back | 倒车段 | sweep_base back_point_count |
+| curve_paths | curve_paths | 弯道标记 | sweep_base → curve_paths_flag |
+| road_width | road_width | **不被消费**（见 §2.3） | — |
+| localization_mode | localization_mode | 0=纯激光 1=融合(激光+RTK) 2=纯差分(RTK)，逐段切换 | sweep_base localization_mode_flag |
+| **road_edge_distance** | ⚠️ **JSON 缺失** | 贴边距离（cm） | 当前分支未见消费方（grep 零命中，疑似预留） |
+| clean_flag | clean_flag | 清扫/循迹 | sweep_base clean_flag_ |
+
+**MapTool JSON 中车载不解析的字段**（`custom_path.cpp` 只解析上表 13 个键 + x/y/yaw 几何，其余全部无视）：`bush_cutwidth`、`force_pass`、`ignore_obstacles`、`parking_area`、`reverse_traj`、`seismic→seisimic` 拼写、`pixel_x/pixel_y`。
 
 ### 2.2 换算/丢弃字段
 
@@ -40,13 +42,20 @@ MapTool 轨迹点自带双坐标（南岸晶都样例实测）：
 |---|---|---|
 | pixel_x, pixel_y | **不透传**（规划端无用） | 仅 MapTool 显示用；换算抽查见 §1 |
 
-### 2.3 待现场确认（v1.1 迭代补）
+### 2.3 v1.1 源码核销（原疑问 3 项，全部关闭）
 
-| 字段 | 疑问 |
+| 原疑问 | 结论（源码证据） |
 |---|---|
-| bush_cutwidth 语义与单位 | 样例全 0，需实测样本 |
-| road_width=0 的默认行为 | 是"用全局默认宽"还是 0 宽，需对 yaml/源码 |
-| localization_mode 的取值枚举 | 样例全 0 |
+| road_width=0 是默认宽还是零宽？ | **都不是——车载不消费该字段**。贴边用的路宽在 `sweep_base.cpp:645` 硬编码 `special_road_width[i]=400`（mm，编码时 ×1000 进 road_msg_sample 下发给 sampler）。改轨迹 JSON 的 road_width 无效；要改贴边行为得走参数集/源码 |
+| bush_cutwidth 单位？ | **车载无此字段**（msg 与解析代码均无），MapTool 单方面字段，下发即丢。映射表标记为「仅 MapTool 本地」 |
+| localization_mode 枚举？ | **0=纯激光（NDT/HDL）1=融合（激光+RTK）2=纯差分（RTK）**；逐段切换；JSON 缺键时 custom_path 默认 0（custom_path.cpp:326） |
+
+### 2.4 ⚠️ 新发现的桥接层必做项（升级为 T0.4.5）
+
+`custom_path.cpp` 解析 JSON 时**缺失键会 asInt() 崩溃或未定义**（如 welt/road_edge_distance 在现有 MapTool JSON 里根本不存在）。桥接层转换器必须：
+1. 对 13 个 msg 字段**全部补齐缺省值**（welt=0、road_edge_distance=0、seismic→seisimic 改名）再交给 custom_path；
+2. `post_process` 键处理与 B 线 W16 结论一致（须为布尔，false 时跳过密度后处理）；
+3. 「在 MapTool 里标贴边」功能需先给 MapTool 加 `welt`/`road_edge_distance` 标注 UI（新需求，与贴边回归场景强相关，报用户决策）。
 
 ## 3. 参数覆盖（param_overrides，run 级）
 
