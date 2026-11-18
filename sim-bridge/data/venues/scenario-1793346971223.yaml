@@ -1,0 +1,17 @@
+schema: venue/v1
+venue_id: scenario-1793346971223
+name: 标准回归样本（76s 单场地）
+created: 2026-11-18
+created_by: user
+map_pgm: testdata/scenario_1793346971223/1793346971223.pgm
+map_pcd: /Users/a11/Downloads/scenario_1793346971223/1793346971223_frames_no_ground.pcd
+pcd_height_filter: {min: -0.82, max: 2.50}   # 实测 z[-1.82,2.70]，雷达装高 0.8 m，地面约 -0.82
+default_traj: testdata/scenario_1793346971223/1793347176294.json
+map_pose_ref:
+  origin: {x: -22.796825, y: -77.406677}
+  resolution: 0.05
+bags:
+  - bag: bags/scenario_1793346971223.bag
+    traj: testdata/scenario_1793346971223/1793347176294.json
+    duration_s: 76
+    notes: B 线默认场地；轨迹 50 点全段 road_id=1（右贴边）、bypass=1；post_process=0
