@@ -1,0 +1,18 @@
+# T2.1 场地档案样例（与 docs/venue_schema.md 对应，供 CRUD 测试）
+schema: venue/v1
+venue_id: nana-jingdu-01
+name: 南岸晶都
+created: 2026-11-18
+created_by: user
+map_pgm: maps/nana/map.pgm
+map_pcd: maps/nana/map.pcd
+pcd_height_filter: {min: 0.05, max: 2.0}
+default_traj: trajs/主路新轨迹.json
+map_pose_ref:
+  origin: {x: -10.0, y: -8.0}
+  resolution: 0.05
+bags:
+  - bag: bags/nana_20261117_351s.bag
+    traj: trajs/主路新轨迹，微调版.json
+    duration_s: 351
+    notes: 182° 转向样本
