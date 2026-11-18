@@ -29,14 +29,17 @@
 // ================= FovOverlayItem =================
 
 FovOverlayItem::FovOverlayItem(QGraphicsItem* parent)
-    : QGraphicsItem(parent)
+    : QGraphicsObject(parent)
 {
     // 不参与命中测试：图层纯展示，鼠标事件全部落到下层的轨迹点/地图
     setAcceptedMouseButtons(Qt::NoButton);
     setAcceptHoverEvents(false);
     setFlag(QGraphicsItem::ItemIsSelectable, false);
     setFlag(QGraphicsItem::ItemIsMovable, false);
-    setZValue(-1.0);   // 压在轨迹点/线之下
+    // z=0.5：必须高于地图 pixmap（默认 0），否则扇形被地图盖住看不见；
+    // 又低于轨迹线与轨迹点（默认 0 但后添加者在上，且轨迹点带 pen 绘制），
+    // 实测轨迹点/线仍可见且可拖拽（本 item 不接受鼠标事件）。
+    setZValue(0.5);
 }
 
 void FovOverlayItem::setEntries(const QVector<Entry>& entries)
@@ -125,12 +128,15 @@ void FovLayer::attachScene(BQGraphicsScene* scene)
 
 void FovLayer::destroyOverlay()
 {
-    if (m_overlay) {
-        if (m_scene && m_overlay->scene() == m_scene)
-            m_scene->removeItem(m_overlay);
-        delete m_overlay;
-        m_overlay = nullptr;
+    // 用 QPointer 判定：场景 clear() 会 delete item，此时 m_overlay 已悬垂，
+    // 不能再 removeItem/delete
+    if (m_overlayGuard) {
+        if (m_scene && m_overlayGuard->scene() == m_scene)
+            m_scene->removeItem(m_overlayGuard);
+        delete m_overlayGuard.data();
     }
+    m_overlayGuard = nullptr;
+    m_overlay = nullptr;
 }
 
 void FovLayer::setPathList(const QList<BPathItem*>& paths)
@@ -228,10 +234,14 @@ void FovLayer::scheduleRecalc()
 void FovLayer::rebuildOverlay()
 {
     if (!m_scene) return;
-    if (!m_overlay) {
-        m_overlay = new FovOverlayItem;
-        m_overlay->setZValue(-1.0);
-        m_scene->addItem(m_overlay);
+    // 关键：场景 clear()（打开新图时）会 delete 所有 item，m_overlay 变悬垂。
+    // QPointer 已自动置空 → 这里必须重建，绝不能凭 m_overlay 非空就跳过。
+    if (!m_overlayGuard) {
+        auto* item = new FovOverlayItem;
+        item->setZValue(0.5);
+        m_scene->addItem(item);
+        m_overlayGuard = item;
+        m_overlay = item;
     }
 }
 
@@ -251,6 +261,10 @@ void FovLayer::recalcAll()
 
     for (BPathItem* path : m_paths) {
         if (!path) continue;
+        // 防御：场景 clear() 后轨迹 item 已被 delete，指针悬垂。
+        // 判断依据：item 若仍存活且已加入场景，scene() 非空；未加入场景时也无法安全判断，
+        // 故要求 trackers 存活（mainwindow 在 clear 后会调 setPathList 刷新列表）。
+        if (path->scene() != m_scene) continue;
         const int n = path->pointsNumber();
         for (int i = 0; i < n; ++i) {
             BPointItem* pt = path->getElement(i);

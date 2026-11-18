@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.16)
 project(blz_smoke CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/mac-tool-src/mainwindow ${CMAKE_CURRENT_SOURCE_DIR}/mac-tool-src/dialog)
 
 add_executable(test_core core/tests/test_core.cpp
                          core/grid_projection.cpp
@@ -25,3 +27,14 @@ target_include_directories(test_ui_integration PRIVATE
     mac-tool-src/items
     mac-tool-src/dialog)
 target_link_libraries(test_ui_integration Qt6::Core Qt6::Gui Qt6::Widgets)
+
+# ---- T1.5 bugfix 回归（场景 clear 悬垂 / z 值遮挡）----
+add_executable(test_fov_regression core/tests/test_fov_regression.cpp
+                                  core/grid_projection.cpp
+                                  core/fov_raycast.cpp
+                                  mac-tool-src/mainwindow/fov_layer.cpp
+                                  mac-tool-src/items/GraphicsType.cpp
+                                  mac-tool-src/dialog/attributeAddDialog.cpp)
+target_include_directories(test_fov_regression PRIVATE
+    core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
+target_link_libraries(test_fov_regression Qt6::Core Qt6::Gui Qt6::Widgets)

@@ -7,11 +7,13 @@
 // 对 mainwindow 的改动只做"接线"（成员 + 菜单入口 + 信号槽 + 几处 refresh 调用）。
 
 #include <QObject>
+#include <QGraphicsObject>
 #include <QGraphicsItem>
 #include <QGraphicsSceneMouseEvent>
 #include <QColor>
 #include <QVector>
 #include <QPolygonF>
+#include <QPointer>
 
 class BQGraphicsScene;
 class BPathItem;
@@ -24,8 +26,11 @@ class QTimer;
 namespace blz { struct GridProjection; }
 
 // ---------- 非交互覆盖 item：一次性画出所有视锥扇形与命中点 ----------
-class FovOverlayItem : public QGraphicsItem
+// 用 QGraphicsObject（= QObject + QGraphicsItem）以便被 QPointer 安全守卫：
+// 场景 clear() 会 delete 本 item，QPointer 自动置空，避免悬垂指针访问崩溃。
+class FovOverlayItem : public QGraphicsObject
 {
+    Q_OBJECT
 public:
     struct Entry {
         QPolygonF sector;        // 像素坐标视锥扇形（含顶点）
@@ -71,9 +76,11 @@ public:
 
     // 状态（冒烟断言用）
     bool enabled() const { return m_enabled; }
-    int entryCount() const { return m_overlay ? m_overlay->entryCount() : 0; }
+    int entryCount() const { return m_overlayGuard ? m_overlayGuard->entryCount() : 0; }
     int hitCount() const { return m_lastHitCount; }
     double zmax() const { return m_zmax; }
+    // 冒烟用：读取覆盖层当前 z 值（无覆盖层返回 -999）
+    double overlayZValue() const { return m_overlayGuard ? m_overlayGuard->zValue() : -999.0; }
 
 public slots:
     void setEnabled(bool on);   // "前视快算"开关
@@ -108,7 +115,8 @@ private:
     int m_lastHitCount = 0;
 
     // 渲染
-    FovOverlayItem* m_overlay = nullptr;
+    FovOverlayItem* m_overlay = nullptr;   // 注意：场景 clear() 会 delete 它，用前必须查 QPointer
+    QPointer<FovOverlayItem> m_overlayGuard; // 场景销毁时自动置空，防悬垂
 
     // 拖点防抖
     QTimer* m_debounce = nullptr;

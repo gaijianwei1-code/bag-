@@ -571,7 +571,10 @@ void MainWindow::cleanImage()
     origin_y = 0;
 
     //T1.5:关闭时清掉前视点云缓存（unique_ptr 自带置空）
+    //注意：上面 pgmScene->clear() 已 delete 所有 item（含轨迹与前视图层），
+    //必须先清空轨迹指针列表，再让图层重建，否则图层会访问悬垂指针
     if (fovLayer) {
+        fovLayer->setPathList(QList<BPathItem*>());   // 清悬垂轨迹指针（先于重建）
         fovLayer->setGrid(nullptr);
         fovLayer->setMapInfo(0, 0, 0, 0);
         fovRefreshPaths();
