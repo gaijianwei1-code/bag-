@@ -42,20 +42,36 @@ MapTool 轨迹点自带双坐标（南岸晶都样例实测）：
 |---|---|---|
 | pixel_x, pixel_y | **不透传**（规划端无用） | 仅 MapTool 显示用；换算抽查见 §1 |
 
-### 2.3 v1.1 源码核销（原疑问 3 项，全部关闭）
+### 2.3 v1.2 源码核销（原疑问 3 项 + 贴边链路，2026-11-18 全部关闭）
+
+**重要更正（v1.1 → v1.2）**：v1.1 曾判断"贴边标注传不到车上"——**错误**。用户提供的属性对话框截图证实：**贴边功能走 `road_id` 字段编码**，链路完整：
+
+```
+MapTool 属性对话框（road_id 单选：右贴边1 / 左贴边2 / (3) / (4) / 不贴边0 …）
+  → JSON road_id
+  → custom_path 透传 → sweep_base special_road_[i] = road_id
+  → 目标点下发时 is_sticking_ = road_id（非 0 即贴边）
+      ├─ adjustStickingGoal()：目标点向路沿偏移（1/3 右贴边 +、2/4 左贴边 −）
+      └─ /special_road → obstacle_points edge_alignment_state_
+            → 贴边侧点云裁剪（右贴边裁右侧/左贴边裁左侧，避免路沿被当障碍停障）
+  → /special_road_sampler = road_id + special_road_width × 1000（宽度硬编码 400mm）
+```
 
 | 原疑问 | 结论（源码证据） |
 |---|---|
-| road_width=0 是默认宽还是零宽？ | **都不是——车载不消费该字段**。贴边用的路宽在 `sweep_base.cpp:645` 硬编码 `special_road_width[i]=400`（mm，编码时 ×1000 进 road_msg_sample 下发给 sampler）。改轨迹 JSON 的 road_width 无效；要改贴边行为得走参数集/源码 |
-| bush_cutwidth 单位？ | **车载无此字段**（msg 与解析代码均无），MapTool 单方面字段，下发即丢。映射表标记为「仅 MapTool 本地」 |
-| localization_mode 枚举？ | **0=纯激光（NDT/HDL）1=融合（激光+RTK）2=纯差分（RTK）**；逐段切换；JSON 缺键时 custom_path 默认 0（custom_path.cpp:326） |
+| road_width=0 是默认宽还是零宽？ | 车载不消费轨迹里的 road_width：贴边采样宽度在 `sweep_base.cpp:645` 硬编码 `special_road_width[i]=400`（mm），UI 的"采样道路宽度(cm)"只影响 MapTool 显示/绘制。但 **road_id 编码了贴边语义且完整生效** |
+| bush_cutwidth 单位？ | 车载无此字段（msg 13 字段无、全仓库无），属 MapTool"自定义属性"透传槽位，当前下发即丢 |
+| localization_mode 枚举？ | **0=纯激光（NDT/HDL）1=融合（激光+RTK）2=纯差分（RTK）**；逐段切换；JSON 缺键默认 0（custom_path.cpp:326） |
+| road_id 值域语义（新，截图+源码确认） | 0=不贴边；1=右贴边向左采样；2=左贴边向右采样；3/4=贴边不采样（右/左）；10=不贴边向左采样；20=不贴边向右采样。**is_sticking_ 非 0 即触发贴边目标点偏移 + 对应侧点云裁剪（1/3 查右侧、2/4 查左侧）** |
 
-### 2.4 ⚠️ 新发现的桥接层必做项（升级为 T0.4.5）
+### 2.4 桥接层转换器必做项（T0.4.5）
 
-`custom_path.cpp` 解析 JSON 时**缺失键会 asInt() 崩溃或未定义**（如 welt/road_edge_distance 在现有 MapTool JSON 里根本不存在）。桥接层转换器必须：
-1. 对 13 个 msg 字段**全部补齐缺省值**（welt=0、road_edge_distance=0、seismic→seisimic 改名）再交给 custom_path；
-2. `post_process` 键处理与 B 线 W16 结论一致（须为布尔，false 时跳过密度后处理）；
-3. 「在 MapTool 里标贴边」功能需先给 MapTool 加 `welt`/`road_edge_distance` 标注 UI（新需求，与贴边回归场景强相关，报用户决策）。
+1. `custom_path.cpp` 对 13 个 msg 键缺键时 `asInt()` 行为不安全 → 转换器**补齐全部 13 键缺省值**（缺省全 0）；
+2. `seismic` → msg 字段 `seisimic`（车载拼写）改名映射；
+3. `post_process` 须为布尔（W16 结论：false 跳过密度后处理，类型错会静默失败）；
+4. `force_pass`/`ignore_obstacles`/`parking_area`/`reverse_traj`/`bush_cutwidth`：车载不解析，转换时**丢弃并在 UI 标注"仅本地"**，避免用户误以为生效；
+5. ~~给 MapTool 加 welt/road_edge_distance~~（v1.2 撤销：贴边走 road_id，UI 已有）；`road_edge_distance`/`welt` 在当前分支无消费方，暂不透传。
+6. **L0 前视快算联动**：road_id ∈ {1,2,3,4} 的段，前视渲染应叠加"贴边偏移预览"（目标点向路沿偏移 global_sticking_distance_）——贴边段的真实行车线 ≠ 轨迹线。
 
 ## 3. 参数覆盖（param_overrides，run 级）
 
