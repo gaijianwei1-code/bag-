@@ -1,6 +1,12 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 
+#include "../../core/grid_projection.h"   //T1.5: pcd 加载/投影
+
+#include <QDockWidget>
+#include <QAction>
+#include <QMenuBar>
+
 #include <iomanip>     // std::setprecision —— MSVC 会通过其它头文件顺带引入，
                        // 但 GCC/Clang（macOS）不会，必须显式包含
 
@@ -53,6 +59,41 @@ MainWindow::MainWindow(QWidget *parent)
     ui->statusbar->addPermanentWidget(mousePos);
 
     createToolBar();
+
+    //===== T1.5 前视命中区图层接线 =====
+    //菜单入口：开始菜单追加 "打开点云pcd"，帮助菜单追加 "前视快算" 开关 + 控制面板
+    fovLayer = new FovLayer(this);
+    fovLayer->attachScene(pgmScene);
+    {
+        QAction* openPcd = new QAction(tr("打开点云pcd"), this);
+        openPcd->setObjectName("doOpenPcd");
+        connect(openPcd, &QAction::triggered, this, &MainWindow::on_doOpenPcd_triggered);
+        ui->menubar->findChild<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
+        //加到"开始"菜单（menu）末尾
+        QList<QMenu*> menus = ui->menubar->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!menus.isEmpty()) menus.first()->addAction(openPcd);
+
+        QAction* fovToggle = new QAction(tr("前视快算"), this);
+        fovToggle->setObjectName("doFovToggle");
+        fovToggle->setCheckable(true);
+        connect(fovToggle, &QAction::triggered, this, &MainWindow::on_doFovToggle_triggered);
+        if (!menus.isEmpty()) menus.first()->addAction(fovToggle);
+        //控制面板 dock（含开关按钮，与 menu action 双向联动）
+        QDockWidget* fovDock = fovLayer->createControlDock(this);
+        addDockWidget(Qt::RightDockWidgetArea, fovDock);
+        fovDock->hide();    //默认隐藏，避免改变现有布局；需要时从"窗口"里唤出
+        connect(fovToggle, &QAction::toggled, fovDock, &QDockWidget::setVisible);
+        connect(fovLayer, &FovLayer::zmaxChanged, this, [this](double v) {
+            if (fovCloud) {
+                fovGrid = std::make_unique<blz::GridProjection>(
+                    blz::project_to_grid(*fovCloud, 0.4, 0.05, v));
+                fovLayer->setGrid(fovGrid.get());
+            }
+            if (fovLayer->enabled()) fovLayer->recalcAll();
+        });
+    }
+    //===== T1.5 接线结束 =====
+
     setActionStatus(false);
     setWindowTitle("Map Tool");
 
@@ -528,6 +569,15 @@ void MainWindow::cleanImage()
     resolution = 0;
     origin_x = 0;
     origin_y = 0;
+
+    //T1.5:关闭时清掉前视点云缓存（unique_ptr 自带置空）
+    if (fovLayer) {
+        fovLayer->setGrid(nullptr);
+        fovLayer->setMapInfo(0, 0, 0, 0);
+        fovRefreshPaths();
+    }
+    fovGrid.reset();
+    fovCloud.reset();
 
     //控件设为不可用
     setActionStatus(false);
@@ -1200,6 +1250,60 @@ QString MainWindow::getUserPath()
     return userPath;
 }
 
+//========== T1.5 前视命中区图层 ==========
+
+//把当前轨迹集合同步给前视图层并触发重算
+void MainWindow::fovRefreshPaths()
+{
+    if (!fovLayer) return;
+    QList<BPathItem*> paths = m_path_list;
+    if (m_path && !paths.contains(m_path)) paths.push_back(m_path);
+    fovLayer->setPathList(paths);
+    if (fovLayer->enabled())
+        fovLayer->recalcAll();
+}
+
+//打开点云 pcd：读取 → 高度过滤投影 → 缓存 → 图层重算
+void MainWindow::on_doOpenPcd_triggered()
+{
+    QString dir = (ConstImage != "") ? ConstImage.left(ConstImage.lastIndexOf("/")) : getUserPath();
+    QString pcdPath = QFileDialog::getOpenFileName(this, tr("打开点云 pcd"), dir,
+                                                   tr("Point Cloud (*.pcd);;All Files (*)"));
+    if (pcdPath.isEmpty()) return;
+
+    //同步读文件（几秒可接受）：statusBar 提示 + processEvents 让 UI 不冻结
+    ui->statusbar->showMessage("正在加载点云: " + pcdPath + " ...");
+    QApplication::processEvents();
+
+    try {
+        auto pts = blz::load_pcd(pcdPath.toStdString());
+        ui->statusbar->showMessage(QString("点云读取完成: %1 点，正在投影 ...").arg(pts.size()));
+        QApplication::processEvents();
+
+        fovCloud = std::make_unique<std::vector<blz::Vec3>>(std::move(pts));
+        fovGrid = std::make_unique<blz::GridProjection>(
+            blz::project_to_grid(*fovCloud, 0.4, 0.05, fovLayer->zmax()));
+
+        fovLayer->setGrid(fovGrid.get());
+        if (fovLayer->enabled())
+            fovLayer->recalcAll();
+
+        ui->statusbar->showMessage(QString("点云已加载: %1 点（参与投影 %2）")
+                                       .arg(fovCloud->size())
+                                       .arg(fovGrid->point_count), 5000);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr(WINDOW_ERROR), tr("pcd 加载失败:\n") + e.what());
+        ui->statusbar->clearMessage();
+    }
+}
+
+//前视快算开关（menu action checkable）
+void MainWindow::on_doFovToggle_triggered()
+{
+    QAction* a = qobject_cast<QAction*>(sender());
+    if (fovLayer && a) fovLayer->setEnabled(a->isChecked());
+}
+
 //测试按钮
 void MainWindow::on_actiontest_triggered()
 {
@@ -1384,6 +1488,12 @@ void MainWindow::openYaml(QString yamlPath)
     startRect = new startRectItem(QPointF(-origin_x / resolution, pgmPixmapItem->pixmap().height() - 1 + origin_y / resolution),
                                   1.4 / resolution, 1.7 / resolution, - yaw * 180.0 / M_PI );
     pgmScene->addItem(startRect);
+
+    //T1.5:yaml 就绪 → 同步地图坐标参数给前视图层
+    if (fovLayer && pgmPixmapItem) {
+        fovLayer->setMapInfo(resolution, origin_x, origin_y, pgmPixmapItem->pixmap().height());
+        fovRefreshPaths();
+    }
 }
 
 //打开yaml文件
@@ -3219,13 +3329,15 @@ void MainWindow::on_doCleanAllMPath_triggered()
     if ( m_path->scene() == pgmScene )
         pgmScene->removeItem(m_path);
     m_path->clear();
+
+    //T1.5:轨迹清空 → 前视图层重算（清空扇形）
+    fovRefreshPaths();
 }
 
 //保存并进行下一条轨迹绘制
 void MainWindow::on_do_draw_next_mpath_triggered()
 {
-    m_path_list.push_back(m_path);
-    disconnect(pgmScene, SIGNAL(updatePoint(QPointF,QList<QPointF>,bool)), m_path, SLOT(pushPoint(QPointF,QList<QPointF>,bool)));
+    m_path_list.push_back(m_path);    disconnect(pgmScene, SIGNAL(updatePoint(QPointF,QList<QPointF>,bool)), m_path, SLOT(pushPoint(QPointF,QList<QPointF>,bool)));
 
     m_path = new BPathItem;
     m_path->setPathWidth(m_path_width);
@@ -3234,6 +3346,9 @@ void MainWindow::on_do_draw_next_mpath_triggered()
     connect(pgmScene, SIGNAL(updatePoint(QPointF,QList<QPointF>,bool)), m_path, SLOT(pushPoint(QPointF,QList<QPointF>,bool)));
 
     pgmScene->addItem(m_path);
+
+    //T1.5:轨迹集合变化 → 前视图层重算
+    fovRefreshPaths();
 }
 
 //加载Json文件(多条轨迹)

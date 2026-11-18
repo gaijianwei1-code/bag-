@@ -1,4 +1,4 @@
-# T1.3/T1.4 冒烟测试构建（不进 MapTool 主构建，独立一条命令跑）
+# T1.3/T1.4/T1.5 冒烟测试构建（不进 MapTool 主构建，独立一条命令跑）
 cmake_minimum_required(VERSION 3.16)
 project(blz_smoke CXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -8,3 +8,20 @@ add_executable(test_core core/tests/test_core.cpp
                          core/grid_projection.cpp
                          core/fov_raycast.cpp)
 target_include_directories(test_core PRIVATE core)
+
+# ---- T1.5 UI 集成冒烟 ----
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+add_executable(test_ui_integration core/tests/test_ui_integration.cpp
+                                  core/grid_projection.cpp
+                                  core/fov_raycast.cpp
+                                  mac-tool-src/mainwindow/fov_layer.cpp
+                                  mac-tool-src/items/GraphicsType.cpp
+                                  mac-tool-src/dialog/attributeAddDialog.cpp)
+target_include_directories(test_ui_integration PRIVATE
+    core
+    mac-tool-src
+    mac-tool-src/mainwindow
+    mac-tool-src/items
+    mac-tool-src/dialog)
+target_link_libraries(test_ui_integration Qt6::Core Qt6::Gui Qt6::Widgets)

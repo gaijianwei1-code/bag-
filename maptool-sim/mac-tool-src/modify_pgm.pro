@@ -56,6 +56,9 @@ SOURCES += \
     mainwindow/graphicsview.cpp \
     main.cpp \
     mainwindow/mainwindow.cpp \
+    mainwindow/fov_layer.cpp \
+    ../../maptool-sim/core/grid_projection.cpp \
+    ../../maptool-sim/core/fov_raycast.cpp \
     items/mapSelectItem.cpp \
     items/startRect.cpp
 
@@ -76,6 +79,7 @@ HEADERS += \
     items/test.h \
     mainwindow/graphicsview.h \
     mainwindow/mainwindow.h \
+    mainwindow/fov_layer.h \
     items/mapSelectItem.h \
     items/startRect.h \
     tools/UTF8ToGBEx.h \

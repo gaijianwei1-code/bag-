@@ -53,6 +53,8 @@
 #include "../dialog/drawLine_PointsSelectedBased_Dialog.h"
 #include "../items/ParkingLotItem.h"
 #include "../dialog/rosbagplaydialog.h"
+#include "../../core/grid_projection.h"   //T1.5: blz::GridProjection / Vec3
+#include "fov_layer.h"
 
 #define WINDOW_TITLE "Map Tool"
 #define WINDOW_ERROR "Error - Map Tool"
@@ -161,7 +163,10 @@ private slots:
     void on_doAbout_triggered();    //关于
     void on_do_AutoPS_wec_triggered();  //自动修图
     void on_doCleanJson_triggered();    //清除轨迹
+private slots:
     void on_actiontest_triggered(); //用于测试想要测试的
+    void on_doOpenPcd_triggered();  //T1.5:打开点云pcd
+    void on_doFovToggle_triggered();    //T1.5:前视快算开关
     void on_do_draw_path_triggered();   //自由绘制轨迹
     void on_do_fill_path_triggered();   //填充轨迹
     void on_doOpenYaml_triggered(); //打开YAML文件
@@ -294,6 +299,12 @@ private:
     QProcess *mappingProcess = nullptr;
     QProcess *rosbagPlayProcess = nullptr;
     QProcess *saveMapProcess = nullptr;
+
+    //T1.5:前视命中区图层
+    FovLayer *fovLayer = nullptr;
+    std::unique_ptr<blz::GridProjection> fovGrid;   //pcd 投影占据网格缓存
+    std::unique_ptr<std::vector<blz::Vec3>> fovCloud;   //原始点云缓存（zmax 重投影用）
+    void fovRefreshPaths();     //把当前所有轨迹同步给 fovLayer 并触发重算
 };
 
 #endif // MAINWINDOW_H

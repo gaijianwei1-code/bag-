@@ -2,24 +2,59 @@
 #define FOV_LAYER_H
 
 // T1.5: 前视命中区渲染图层（集成 T1.3 grid_projection + T1.4 fov_raycast）
-// 纯 UI 图层：挂接 MapTool 的 BQGraphicsScene，沿轨迹点画视锥扇形与命中区。
-// 对 mainwindow 的改动只做"接线"（成员 + 菜单/工具栏入口 + 信号槽）。
+// 渲染用单个非交互 QGraphicsItem（FovOverlayItem），不产生大量可点选 item，
+// 不干扰 MapTool 原有的选点/拖拽/框选交互。
+// 对 mainwindow 的改动只做"接线"（成员 + 菜单入口 + 信号槽 + 几处 refresh 调用）。
 
 #include <QObject>
-#include <QGraphicsItemGroup>
-#include <QList>
+#include <QGraphicsItem>
+#include <QGraphicsSceneMouseEvent>
 #include <QColor>
+#include <QVector>
+#include <QPolygonF>
 
-// 前向声明，避免拖入重型头文件
 class BQGraphicsScene;
 class BPathItem;
 class QDockWidget;
 class QDoubleSpinBox;
 class QToolButton;
 class QMainWindow;
+class QTimer;
 
 namespace blz { struct GridProjection; }
 
+// ---------- 非交互覆盖 item：一次性画出所有视锥扇形与命中点 ----------
+class FovOverlayItem : public QGraphicsItem
+{
+public:
+    struct Entry {
+        QPolygonF sector;        // 像素坐标视锥扇形（含顶点）
+        QColor sectorColor;
+        QVector<QPointF> dots;   // 命中点（像素坐标）
+    };
+
+    explicit FovOverlayItem(QGraphicsItem* parent = nullptr);
+
+    void setEntries(const QVector<Entry>& entries);
+    int entryCount() const { return m_entries.size(); }
+    int dotTotal() const;
+    QRectF unionRect() const;
+
+    QRectF boundingRect() const override;
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option,
+               QWidget* widget) override;
+
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override { event->ignore(); }
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override { event->ignore(); }
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override { event->ignore(); }
+
+private:
+    QVector<Entry> m_entries;
+    QRectF m_brect;
+};
+
+// ---------- 图层控制器 ----------
 class FovLayer : public QObject
 {
     Q_OBJECT
@@ -28,65 +63,58 @@ public:
     ~FovLayer() override;
 
     // ---- 接线接口（mainwindow 调用）----
-    // 挂接到场景（item 全部 add 到该 scene；重复调用会先 detach）
     void attachScene(BQGraphicsScene* scene);
-    // 数据源：单条轨迹（当前编辑轨迹 m_path）
-    void setPath(BPathItem* path);
-    // 数据源：多条轨迹（m_path_list），内部合并遍历
-    void setPathList(const QList<BPathItem*>& paths);
-    // pcd 占据网格注入（已 project_to_grid），layer 不持有所有权
-    void setGrid(const blz::GridProjection* grid);
-    // 世界坐标 ← 场景(像素)坐标换算所需的地图参数（与 mainwindow 的 yaml 语义一致）
+    void setPathList(const QList<BPathItem*>& paths);   // 数据源（含当前编辑轨迹）
+    void setGrid(const blz::GridProjection* grid);      // pcd 占据网格（不持有所有权）
     void setMapInfo(double resolution, double origin_x, double origin_y, int pgm_height);
-    // 控制面板（dock 内容 QWidget），参数改动即时触发 recalcAll()
     QDockWidget* createControlDock(QMainWindow* win);
 
-    // 状态
+    // 状态（冒烟断言用）
     bool enabled() const { return m_enabled; }
-    int itemCount() const { return m_group ? m_group->childItems().size() : 0; }
+    int entryCount() const { return m_overlay ? m_overlay->entryCount() : 0; }
     int hitCount() const { return m_lastHitCount; }
+    double zmax() const { return m_zmax; }
 
 public slots:
-    // "前视快算"开关（工具栏按钮 / menu action toggled）
-    void setEnabled(bool on);
-    // 全轨迹重算（毫秒级，≤100 点 × μs/cast）
-    void recalcAll();
-    // 参数槽（spinbox valueChanged 接入）
+    void setEnabled(bool on);   // "前视快算"开关
+    void recalcAll();           // 全轨迹重算（毫秒级）
     void setFrontDist(double v);
     void setHalfAngleDeg(double v);
-    void setZmax(double v);
+    void setZmax(double v);     // 仅存值 + 发 zmaxChanged（重投影由 mainwindow 做）
 
 signals:
-    // 重算完成后发出（冒烟测试断言用）
-    void recalculated(int hitCount);
+    void recalculated(int hitCount);   // 重算完成（冒烟断言用）
+    void zmaxChanged(double v);        // mainwindow 收到后重投影 pcd 再触发 recalcAll
 
 private:
-    void detachItems();
-    void clearPathRefs();
+    void destroyOverlay();
+    void scheduleRecalc();      // 场景 changed 防抖（拖点即时刷新）
+    void rebuildOverlay();
 
     BQGraphicsScene* m_scene = nullptr;
     QList<BPathItem*> m_paths;
     const blz::GridProjection* m_grid = nullptr;
 
-    // 地图参数（像素 → 世界米）
+    // 地图参数（像素 ↔ 世界米，与 mainwindow yaml/json 语义一致）
     double m_resolution = 0;
     double m_origin_x = 0, m_origin_y = 0;
     int m_pgm_height = 0;
 
     // FOV 参数
-    double m_front_dist = 2.0;      // 米
-    double m_half_angle_deg = 30.0; // 度
-    double m_zmax = 2.0;            // 米（高度过滤上限，重投影用）
+    double m_front_dist = 2.0;
+    double m_half_angle_deg = 30.0;
+    double m_zmax = 2.0;
     bool m_enabled = false;
     int m_lastHitCount = 0;
 
     // 渲染
-    QGraphicsItemGroup* m_group = nullptr; // 所有 FOV item 的容器，z 值压在轨迹下面
-    QColor m_sectorColor;    // 视锥扇形（半透明）
-    QColor m_hitColor;       // 命中区（红）
-    QColor m_freeColor;      // 无命中的淡色
+    FovOverlayItem* m_overlay = nullptr;
 
-    // 控制面板控件（不持有所有权，dock 持有）
+    // 拖点防抖
+    QTimer* m_debounce = nullptr;
+    bool m_recalculating = false;
+
+    // 控制面板控件（dock 持有所有权）
     QDoubleSpinBox* m_spinFront = nullptr;
     QDoubleSpinBox* m_spinHalf = nullptr;
     QDoubleSpinBox* m_spinZmax = nullptr;
