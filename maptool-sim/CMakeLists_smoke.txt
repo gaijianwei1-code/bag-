@@ -1,0 +1,10 @@
+# T1.3/T1.4 冒烟测试构建（不进 MapTool 主构建，独立一条命令跑）
+cmake_minimum_required(VERSION 3.16)
+project(blz_smoke CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(test_core core/tests/test_core.cpp
+                         core/grid_projection.cpp
+                         core/fov_raycast.cpp)
+target_include_directories(test_core PRIVATE core)
