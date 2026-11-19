@@ -88,8 +88,10 @@ def build_scene(venue, req, init_pose, run_id):
                   f"{init_pose.get('samples')} 条样本中位值提取"),
     }
     # 参数覆盖走独立参数集副本，scene 只带 id 引用
-    if req.get("param_set"):
-        scene["param_set"] = req["param_set"]
+    # 优先用请求指定的；否则用场地档案的 default_param_set（有的场地必需特定参数才能跑）
+    ps = req.get("param_set") or venue.get("default_param_set")
+    if ps:
+        scene["param_set"] = ps
     if req.get("segment"):
         scene["segment"] = req["segment"]
     return scene
@@ -192,11 +194,14 @@ def submit(venue, req, run_id, on_status=None):
                 ["docker", "cp", f"{src_dir}", f"{CONTAINER}:{WS_IN_CONTAINER}/variant_tmp/"],
                 check=True, capture_output=True)
 
+        # 参数集：b_line_run 的第 5 个命令行参数（不是从 scene 读）
+        ps_id = scene.get("param_set") or ""
+        ps_dir = f"{WS_IN_CONTAINER}/sim/param_sets/{ps_id}" if ps_id else ""
         cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
                f"BLINE_WS={WS_IN_CONTAINER}/variant_tmp "
                f"python3 {WS_IN_CONTAINER}/variant_tmp/sim/scripts/b_line_run.py "
                f"{run_id} '' {scene['duration_s']} {cpath} "
-               f"{req.get('param_set', '')} ''")
+               f"{ps_dir} ''")
         rc, out, err = _exec(cmd, timeout=max(300, int(scene["duration_s"]) * 4),
                              check=False)
         if rc != 0:

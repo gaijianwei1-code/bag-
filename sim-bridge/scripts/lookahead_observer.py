@@ -45,7 +45,7 @@ class Observer:
         self.theta = msg.data
 
     def cb(self, msg):
-        x, y = msg.pose.position.x, msg.pose.position.y
+        x, y = msg.point.x, msg.point.y   # PointStamped 用 .point
         d = math.hypot(x, y)
         self.buf = {"type": "lookahead", "dist": round(d, 4),
                     "x": round(x, 4), "y": round(y, 4)}
@@ -82,15 +82,16 @@ def main():
         return 1
 
     obs = Observer()
-    rate = rospy.Rate(EMIT_HZ)
     last_n = -1
+    period = 1.0 / EMIT_HZ
+    # 用 wall clock：sim time 未初始化时 rospy.Rate/time 会抛异常
     while not rospy.is_shutdown():
         if obs.buf is not None:
             emit(obs.buf)
             obs.buf = None
             if obs.count % 50 == 0 and obs.count != last_n:
                 last_n = obs.count
-        rate.sleep()
+        time.sleep(period)
     return 0
 
 

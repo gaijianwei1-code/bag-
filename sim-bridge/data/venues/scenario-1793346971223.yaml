@@ -15,6 +15,12 @@ container:
   trajectory: /root/catkin_ws/scenes/scenario_1793346971223/1793347176294.json
   bag: /root/catkin_ws/runs/T08/evidence.bag
   world: /root/catkin_ws/scenes/scenario_1793346971223_world/world_obstacles.pcd
+# 该场地的必需参数集（2026-11-19 实测）：
+# next_goal_tolerance_normal 6 → 1.0
+#   6 m 在 25.7 m 短轨迹上会让 loopSendGoal(10Hz) 疯狂发 goal、sweep_base 反复取消，
+#   planner 永不进 computeVelocityCommands（lookahead/plan/theta 全空）。
+#   0.3 m 又太小（历史 w1_tolerance_0.3 实测 96% 停车）。1.0 m 是可用工作点。
+default_param_set: t31_tol_1p0
 bags:
   - bag: bags/scenario_1793346971223.bag
     traj: testdata/scenario_1793346971223/1793347176294.json
