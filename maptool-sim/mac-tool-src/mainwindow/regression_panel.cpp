@@ -209,7 +209,13 @@ void RegressionPanel::submitRun()
 void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
 {
     if (reply->error() != QNetworkReply::NoError) {
-        showError(reply->errorString());
+        const QString err = reply->errorString();
+        if (err.contains("Connection refused") || err.contains("HostNotFound")) {
+            showError(tr("无法连接 bridge（%1）。\n"
+                         "请先运行：bash sim-bridge/start_bridge.sh").arg(m_bridgeUrl));
+        } else {
+            showError(err);
+        }
         m_btnSubmit->setEnabled(true);
         return;
     }
