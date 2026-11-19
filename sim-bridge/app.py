@@ -299,8 +299,14 @@ def run_timeline(run_id: str, x_bridge_token: Optional[str] = Header(None)):
 
 @app.websocket("/ws/runs/{run_id}/stream")
 async def run_stream(ws: WebSocket, run_id: str):
-    """契约 §3：frame(5-10Hz)/front_hits(1-2Hz)/status/metrics/error。
-    T2.3 接真实回放流；当前回放内存中的 frames 用于联调。"""
+    """契约 §3：frame/front_hits/status/metrics/error。
+
+    直播中：跟随 _runs[run_id]["frames"] 增量推送。
+    已完成的 run：按**原始时间轴回放**（pace 到真实速度），
+    这样 MapTool 连一个已跑完的 run 也能看到车动起来，而不是瞬间刷完。
+    """
+    import asyncio
+
     await ws.accept()
     with _runs_lock:
         run = _runs.get(run_id)
@@ -309,19 +315,47 @@ async def run_stream(ws: WebSocket, run_id: str):
                             "msg": f"run 不存在：{run_id}"})
         await ws.close()
         return
-    import asyncio
+
     last_sent = 0
+    replay_clock = None       # 已完成 run 的回放时钟（秒）
     while True:
         with _runs_lock:
             run = _runs.get(run_id, {})
-            frames = run.get("frames", [])
+            frames = list(run.get("frames", []))
             state = run.get("state")
             metrics = run.get("metrics")
+
+        # 已完成且有缓冲：按真实时间轴回放（1x 速度）
+        if state in ("done", "failed") and frames and last_sent < len(frames):
+            if replay_clock is None:
+                replay_clock = 0.0
+            batch = []
+            while last_sent < len(frames):
+                f = frames[last_sent]
+                t = float(f.get("t") or 0.0)
+                if t <= replay_clock + 0.25:      # 0.25s 前瞻，避免卡顿
+                    batch.append(f)
+                    last_sent += 1
+                else:
+                    break
+            for f in batch:
+                await ws.send_json({"type": "frame", **f})
+            if last_sent < len(frames):
+                await asyncio.sleep(0.2)
+                replay_clock += 0.2
+                continue
+            # 全部推完
+            if metrics and state == "done":
+                await ws.send_json({"type": "metrics", **metrics})
+            await ws.send_json({"type": "status", "state": state, "progress": 1.0,
+                                "msg": "replay finished"})
+            break
+
+        # 直播中：增量推送
         for i in range(last_sent, len(frames)):
             await ws.send_json({"type": "frame", **frames[i]})
         last_sent = len(frames)
         if state in ("done", "failed"):
-            # metrics 已由 _record_to_metrics 生成，按契约单独下发一次
             if metrics and state == "done":
                 await ws.send_json({"type": "metrics", **metrics})
             await ws.send_json({"type": "status", "state": state, "progress": 1.0,

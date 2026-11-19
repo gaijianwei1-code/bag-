@@ -22,7 +22,7 @@ container:
 #   0.3 m 又太小（历史 w1_tolerance_0.3 实测 96% 停车）。1.0 m 是可用工作点。
 default_param_set: t31_tol_1p0
 bags:
-  - bag: bags/scenario_1793346971223.bag
+  - bag: bags/scenario-1793346971223.bag
     traj: testdata/scenario_1793346971223/1793347176294.json
     duration_s: 76
     notes: B 线默认场地；轨迹 50 点全段 road_id=1（右贴边）、bypass=1；post_process=0
