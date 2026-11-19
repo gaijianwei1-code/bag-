@@ -77,6 +77,14 @@ else
     bad "点云缺失（从 Downloads 取）：$PCD"
 fi
 
+# ---------- 5.5 直播跟车冒烟 ----------
+step "5.5 test_live_layer（坐标换算/场景 clear 重建/z 分层）"
+if "$SMOKE_SRC/out/test_live_layer" > /tmp/blz_t4.log 2>&1; then
+    ok "test_live_layer PASS"
+else
+    bad "test_live_layer 失败"; grep -E "^FAIL" /tmp/blz_t4.log | head -5
+fi
+
 # ---------- 6. bridge pytest ----------
 step "6/6 sim-bridge pytest（43 用例：T2.1 接口/T2.2 runner/T2.3 直播；docker 用例默认跳过）"
 cd "$ROOT/sim-bridge" || exit 1

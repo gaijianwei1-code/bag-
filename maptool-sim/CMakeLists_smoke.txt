@@ -38,3 +38,16 @@ add_executable(test_fov_regression core/tests/test_fov_regression.cpp
 target_include_directories(test_fov_regression PRIVATE
     core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
 target_link_libraries(test_fov_regression Qt6::Core Qt6::Gui Qt6::Widgets)
+
+# ---- T2.4 直播跟车冒烟 ----
+find_package(Qt6 REQUIRED COMPONENTS Network WebSockets)
+add_executable(test_live_layer core/tests/test_live_layer.cpp
+                              core/grid_projection.cpp
+                              core/fov_raycast.cpp
+                              mac-tool-src/mainwindow/fov_layer.cpp
+                              mac-tool-src/mainwindow/live_layer.cpp
+                              mac-tool-src/items/GraphicsType.cpp
+                              mac-tool-src/dialog/attributeAddDialog.cpp)
+target_include_directories(test_live_layer PRIVATE
+    core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
+target_link_libraries(test_live_layer Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::WebSockets)

@@ -55,6 +55,7 @@
 #include "../dialog/rosbagplaydialog.h"
 #include "../../core/grid_projection.h"   //T1.5: blz::GridProjection / Vec3
 #include "fov_layer.h"
+#include "live_layer.h"
 
 #define WINDOW_TITLE "Map Tool"
 #define WINDOW_ERROR "Error - Map Tool"
@@ -302,6 +303,7 @@ private:
 
     //T1.5:前视命中区图层
     FovLayer *fovLayer = nullptr;
+    LiveLayer *liveLayer = nullptr;       // T2.4 直播跟车
     std::unique_ptr<blz::GridProjection> fovGrid;   //pcd 投影占据网格缓存
     std::unique_ptr<std::vector<blz::Vec3>> fovCloud;   //原始点云缓存（zmax 重投影用）
     void fovRefreshPaths();     //把当前所有轨迹同步给 fovLayer 并触发重算

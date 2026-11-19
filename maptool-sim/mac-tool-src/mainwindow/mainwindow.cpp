@@ -92,6 +92,23 @@ MainWindow::MainWindow(QWidget *parent)
             if (fovLayer->enabled()) fovLayer->recalcAll();
         });
     }
+    //===== T2.4 直播跟车接线 =====
+    liveLayer = new LiveLayer(this);
+    liveLayer->attachScene(pgmScene);
+    {
+        QAction* liveToggle = new QAction(tr("直播跟车"), this);
+        liveToggle->setObjectName("doLiveToggle");
+        liveToggle->setCheckable(true);
+        QList<QMenu*> menus2 = ui->menubar->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!menus2.isEmpty()) menus2.first()->addAction(liveToggle);
+
+        QDockWidget* liveDock = liveLayer->createControlDock(this);
+        addDockWidget(Qt::RightDockWidgetArea, liveDock);
+        liveDock->hide();
+        connect(liveToggle, &QAction::toggled, liveDock, &QDockWidget::setVisible);
+    }
+    //===== T2.4 接线结束 =====
+
     //===== T1.5 接线结束 =====
 
     setActionStatus(false);
@@ -573,6 +590,9 @@ void MainWindow::cleanImage()
     //T1.5:关闭时清掉前视点云缓存（unique_ptr 自带置空）
     //注意：上面 pgmScene->clear() 已 delete 所有 item（含轨迹与前视图层），
     //必须先清空轨迹指针列表，再让图层重建，否则图层会访问悬垂指针
+    if (liveLayer) {
+        liveLayer->stopLive();          // 场景即将 clear，先断开直播避免写悬垂
+    }
     if (fovLayer) {
         fovLayer->setPathList(QList<BPathItem*>());   // 清悬垂轨迹指针（先于重建）
         fovLayer->setGrid(nullptr);
@@ -1496,6 +1516,10 @@ void MainWindow::openYaml(QString yamlPath)
     if (fovLayer && pgmPixmapItem) {
         fovLayer->setMapInfo(resolution, origin_x, origin_y, pgmPixmapItem->pixmap().height());
         fovRefreshPaths();
+    }
+    //T2.4:同样同步给直播层（像素↔世界换算）
+    if (liveLayer && pgmPixmapItem) {
+        liveLayer->setMapInfo(resolution, origin_x, origin_y, pgmPixmapItem->pixmap().height());
     }
 }
 

@@ -21,7 +21,7 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/mainwindow ${CMAKE_CU
 # ---------- Qt 5.15 / 6.x 双版本支持 ----------
 # 优先找 Qt6（Homebrew `brew install qt`），找不到则回退 Qt5（`brew install qt@5`）
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets Svg)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets Svg Network WebSockets)
 
 # Qt6 在 Windows 上还需要 Core5Compat 才能用 QTextCodec（GBK 路径转换）
 # macOS/Linux 不做 GBK 转换，无需该模块
@@ -68,6 +68,7 @@ set(SOURCES
     main.cpp
     mainwindow/mainwindow.cpp
     mainwindow/fov_layer.cpp
+    mainwindow/live_layer.cpp
     ../../maptool-sim/core/grid_projection.cpp
     ../../maptool-sim/core/fov_raycast.cpp
     items/mapSelectItem.cpp
@@ -92,6 +93,7 @@ set(HEADERS
     mainwindow/graphicsview.h
     mainwindow/mainwindow.h
     mainwindow/fov_layer.h
+    mainwindow/live_layer.h
     items/mapSelectItem.h
     items/startRect.h
     tools/UTF8ToGBEx.h
@@ -136,6 +138,8 @@ set(QT_LIBS
     Qt${QT_VERSION_MAJOR}::Gui
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Svg
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::WebSockets
 )
 if(QT_VERSION_MAJOR GREATER_EQUAL 6 AND WIN32)
     list(APPEND QT_LIBS Qt6::Core5Compat)
