@@ -109,6 +109,41 @@ MainWindow::MainWindow(QWidget *parent)
     }
     //===== T2.4 接线结束 =====
 
+    //===== T4.1 回归任务面板 =====
+    {
+        QAction* regPanel = new QAction(tr("回归任务面板"), this);
+        regPanel->setObjectName("doRegressionPanel");
+        QList<QMenu*> menus3 = ui->menubar->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!menus3.isEmpty()) menus3.first()->addAction(regPanel);
+        connect(regPanel, &QAction::triggered, this, [this]() {
+            if (!regressionPanel) {
+                regressionPanel = new RegressionPanel(
+                    QStringLiteral("http://127.0.0.1:9100"),
+                    QStringLiteral("dev-token"), this);
+                // 提交成功后自动填入直播跟车的 run_id
+                connect(regressionPanel, &RegressionPanel::runSubmitted,
+                        this, [this](const QString& runId) {
+                    if (liveLayer) {
+                        // 自动断开旧连接，填入新 run_id
+                        liveLayer->stopLive();
+                        // 通过 dock 里的 run_id 输入框填入（简单方案）
+                        // 实际上可以通过 findChild 找到 QLineEdit
+                        if (auto* dock = findChild<QDockWidget*>("liveControlDock")) {
+                            if (auto* edit = dock->findChild<QLineEdit*>()) {
+                                // 找到 run_id 输入框（第二个 QLineEdit）
+                                auto edits = dock->findChildren<QLineEdit*>();
+                                if (edits.size() >= 2) edits[1]->setText(runId);
+                            }
+                        }
+                    }
+                    ui->statusbar->showMessage(tr("run 已提交：%1").arg(runId), 8000);
+                });
+            }
+            regressionPanel->show();
+            regressionPanel->raise();
+        });
+    }
+
     //===== T1.5 接线结束 =====
 
     setActionStatus(false);

@@ -69,6 +69,7 @@ set(SOURCES
     mainwindow/mainwindow.cpp
     mainwindow/fov_layer.cpp
     mainwindow/live_layer.cpp
+    mainwindow/regression_panel.cpp
     ../../maptool-sim/core/grid_projection.cpp
     ../../maptool-sim/core/fov_raycast.cpp
     items/mapSelectItem.cpp
@@ -94,6 +95,7 @@ set(HEADERS
     mainwindow/mainwindow.h
     mainwindow/fov_layer.h
     mainwindow/live_layer.h
+    mainwindow/regression_panel.h
     items/mapSelectItem.h
     items/startRect.h
     tools/UTF8ToGBEx.h

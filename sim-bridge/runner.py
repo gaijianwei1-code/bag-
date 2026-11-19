@@ -113,6 +113,25 @@ def main_workspace_clean(repo=BASELINE_REPO):
     return (p.stdout.strip() == ""), p.stdout.strip()
 
 
+def list_branches(repo=BASELINE_REPO):
+    """列出 git 分支（含当前分支标记）。返回 [{branch, commit, is_current}]"""
+    p = subprocess.run(
+        ["git", "-C", repo, "for-each-ref", "--format=%(refname:short) %(objectname:short) %(HEAD)",
+         "refs/heads/"],
+        capture_output=True, text=True)
+    if p.returncode != 0:
+        return []
+    out = []
+    for line in p.stdout.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            out.append({"branch": parts[0], "commit": parts[1],
+                        "is_current": parts[2] == "*"})
+        elif len(parts) == 2:
+            out.append({"branch": parts[0], "commit": parts[1], "is_current": False})
+    return out
+
+
 # ---------- 4. 提交执行 ----------
 def submit(venue, req, run_id, on_status=None):
     """完整执行一个 run（bag_replay 模式）。"""

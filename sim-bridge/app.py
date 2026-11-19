@@ -34,6 +34,13 @@ def health():
     return {"status": "ok", "version": "0.1.0", "ros_ok": ros_ok}
 
 
+@app.get("/branches")
+def list_branches(x_bridge_token: Optional[str] = Header(None)):
+    _auth(x_bridge_token)
+    import runner
+    return runner.list_branches()
+
+
 def _probe_ros() -> bool:
     # T2.2 接容器后实现：docker exec 检查 roscore
     return False
