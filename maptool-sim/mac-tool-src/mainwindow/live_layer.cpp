@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QMainWindow>
 #include <QWebSocket>
+#include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -113,6 +114,13 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
 {
     p->setRenderHint(QPainter::Antialiasing, true);
 
+    // 调试：画一个半透明背景方块证明 overlay 在渲染（T2.4 调试用）
+    if (m_hasVehicle) {
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(255, 255, 0, 40));  // 淡黄背景
+        p->drawRect(m_vehicle.x() - 30, m_vehicle.y() - 30, 60, 60);
+    }
+
     // 1. 真值轨迹（灰虚线）
     if (m_truthPath.size() > 1) {
         QPen pen(QColor(140, 140, 140, 200), 0.0, Qt::DashLine);
@@ -145,18 +153,24 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
         p->drawEllipse(m_carrot, s, s);
     }
 
-    // 5. 车辆图标（蓝色三角，指向车头）
+    // 5. 车辆图标（蓝色三角，指向车头）——放大便于调试
     if (m_hasVehicle) {
-        const double len = 14.0, wid = 8.0;
+        const double len = 24.0, wid = 14.0;
         const double c = std::cos(m_yawPix), s = std::sin(m_yawPix);
         auto rot = [&](double x, double y) {
             return m_vehicle + QPointF(x * c - y * s, x * s + y * c);
         };
         QPolygonF tri;
         tri << rot(len, 0) << rot(-len * 0.6, wid) << rot(-len * 0.6, -wid);
-        p->setPen(QPen(QColor(20, 60, 200, 255), 1.0));
-        p->setBrush(QColor(60, 120, 255, 220));
+        p->setPen(QPen(QColor(255, 0, 0, 255), 2.0));   // 红色粗边（更醒目）
+        p->setBrush(QColor(0, 100, 255, 255));            // 实心蓝
         p->drawPolygon(tri);
+        // 调试文字：显示像素坐标
+        p->setPen(QColor(255, 0, 0, 200));
+        p->setFont(QFont("Monospace", 8));
+        p->drawText(m_vehicle + QPointF(16, -16),
+                    QString("(%1,%2)").arg(m_vehicle.x(), 0, 'f', 0)
+                                       .arg(m_vehicle.y(), 0, 'f', 0));
     }
 }
 
@@ -359,6 +373,14 @@ void LiveLayer::onTextMessage(const QString& msg)
     rebuildOverlay();
     if (!m_overlay) return;
 
+    // 坐标换算未就绪时的诊断提示（m_resolution=0 时 worldToPixel 返回 (0,0)）
+    static bool warned = false;
+    if (m_resolution <= 0.0 && type == QStringLiteral("frame") && !warned) {
+        warned = true;
+        qWarning("[LiveLayer] m_resolution=0，坐标换算无效！"
+                 "请确认已打开 yaml 文件（setMapInfo 需要 resolution/origin）");
+    }
+
     if (type == QStringLiteral("status")) {
         m_state = o.value(QStringLiteral("state")).toString();
         emit stateChanged(m_state,
@@ -373,6 +395,11 @@ void LiveLayer::onTextMessage(const QString& msg)
         const double wy = o.value(QStringLiteral("y")).toDouble();
         const double yaw = o.value(QStringLiteral("yaw")).toDouble();
         const QPointF pix = worldToPixel(wx, wy);
+        qDebug() << "[LiveLayer] frame" << m_frames
+                 << "world=<<" << wx << "," << wy
+                 << " pixel=" << pix
+                 << " res=" << m_resolution
+                 << " pgmH=" << m_pgmHeight;
         // 像素平面角 = -yaw（屏幕 y 向下）
         m_overlay->setVehicle(pix, -yaw, true);
 
