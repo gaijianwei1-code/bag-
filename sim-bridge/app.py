@@ -207,6 +207,7 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                 r["commit"] = result.get("commit")
                 rec = result.get("record") or {}
                 r["metrics"] = _record_to_metrics(rec)
+                print(f"[DEBUG _execute_run] run={run_id} record_keys={list(rec.keys()) if rec else 'None'} motion={rec.get('motion')} metrics_travel={r['metrics'].get('travel_m')}", flush=True)
                 r["state"] = "done"
                 r["progress"] = 1.0
     except Exception as e:  # noqa: BLE001
@@ -318,56 +319,58 @@ async def run_stream(ws: WebSocket, run_id: str):
 
     last_sent = 0
     replay_clock = None       # 已完成 run 的回放时钟（秒）
-    while True:
-        with _runs_lock:
-            run = _runs.get(run_id, {})
-            frames = list(run.get("frames", []))
-            state = run.get("state")
-            metrics = run.get("metrics")
+    try:
+        while True:
+            with _runs_lock:
+                run = _runs.get(run_id, {})
+                frames = list(run.get("frames", []))
+                state = run.get("state")
+                metrics = run.get("metrics")
 
-        # 已完成且有缓冲：按真实时间轴回放（1x 速度）
-        if state in ("done", "failed") and frames and last_sent < len(frames):
-            if replay_clock is None:
-                replay_clock = 0.0
-            batch = []
-            while last_sent < len(frames):
-                f = frames[last_sent]
-                t = float(f.get("t") or 0.0)
-                if t <= replay_clock + 0.15:      # 0.15s 前瞻（减少每批帧数，动画更流畅）
-                    batch.append(f)
-                    last_sent += 1
-                else:
-                    break
-            for f in batch:
-                await ws.send_json({"type": "frame", **f})
-            # 每批发一条回放进度，让 UI 显示"播放中 xx%"
-            if batch:
-                pct = min(0.99, last_sent / max(1, len(frames)))
-                await ws.send_json({"type": "status", "state": "replaying",
-                                    "progress": round(pct, 3),
-                                    "msg": f"回放 {last_sent}/{len(frames)}"})
-            if last_sent < len(frames):
-                # 用真实帧间隔 sleep（而非固定 0.2s），动画速度更接近真实
-                next_t = float(frames[last_sent].get("t") or 0.0)
-                gap = max(0.05, min(1.0, next_t - replay_clock))  # 50ms~1s 之间
-                await asyncio.sleep(gap)
-                replay_clock = next_t
-                continue
-            # 全部推完
-            if metrics and state == "done":
-                await ws.send_json({"type": "metrics", **metrics})
-            await ws.send_json({"type": "status", "state": state, "progress": 1.0,
-                                "msg": "replay finished"})
-            break
+            # 已完成且有缓冲：按真实时间轴回放（1x 速度）
+            if state in ("done", "failed") and frames and last_sent < len(frames):
+                if replay_clock is None:
+                    replay_clock = 0.0
+                batch = []
+                while last_sent < len(frames):
+                    f = frames[last_sent]
+                    t = float(f.get("t") or 0.0)
+                    if t <= replay_clock + 0.15:
+                        batch.append(f)
+                        last_sent += 1
+                    else:
+                        break
+                for f in batch:
+                    await ws.send_json({"type": "frame", **f})
+                # 每批发一条回放进度
+                if batch:
+                    pct = min(0.99, last_sent / max(1, len(frames)))
+                    await ws.send_json({"type": "status", "state": "replaying",
+                                        "progress": round(pct, 3),
+                                        "msg": f"回放 {last_sent}/{len(frames)}"})
+                if last_sent < len(frames):
+                    next_t = float(frames[last_sent].get("t") or 0.0)
+                    gap = max(0.05, min(1.0, next_t - replay_clock))
+                    await asyncio.sleep(gap)
+                    replay_clock = next_t
+                    continue
+                # 全部推完
+                if metrics and state == "done":
+                    await ws.send_json({"type": "metrics", **metrics})
+                await ws.send_json({"type": "status", "state": state, "progress": 1.0,
+                                    "msg": "replay finished"})
+                break
 
-        # 直播中：增量推送
-        for i in range(last_sent, len(frames)):
-            await ws.send_json({"type": "frame", **frames[i]})
-        last_sent = len(frames)
-        if state in ("done", "failed"):
-            if metrics and state == "done":
-                await ws.send_json({"type": "metrics", **metrics})
-            await ws.send_json({"type": "status", "state": state, "progress": 1.0,
-                                "msg": "finished"})
-            break
-        await asyncio.sleep(0.2)  # 5Hz 轮询内存（T2.3 改为 ROS 订阅驱动）
+            # 直播中：增量推送
+            for i in range(last_sent, len(frames)):
+                await ws.send_json({"type": "frame", **frames[i]})
+            last_sent = len(frames)
+            if state in ("done", "failed"):
+                if metrics and state == "done":
+                    await ws.send_json({"type": "metrics", **metrics})
+                await ws.send_json({"type": "status", "state": state, "progress": 1.0,
+                                    "msg": "finished"})
+                break
+            await asyncio.sleep(0.2)
+    except Exception:  # noqa: BLE001  客户端断开等异常静默处理
+        pass

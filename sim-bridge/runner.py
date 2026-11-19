@@ -189,11 +189,13 @@ def submit(venue, req, run_id, on_status=None):
 
 
 def _read_result(run_id):
-    """bag_replay 的结果分布三处：
-    - runs/BLINE/{run_id}_cand/summary.json  → candidate 指标（真正跑的那个）
-    - runs/BLINE/{run_id}_base/summary.json  → baseline 指标
-    - runs/BAG_REPLAY/{run_id}/compare.json  → F 门对比
-    合并为一份 summary 返回。
+    """bag_replay 的结果分布多处，合并为一份 summary 返回。
+
+    实际路径（2026-11-19 实测）：
+      runs/BLINE/{run_id}_base/summary.json   → baseline 指标
+      runs/BLINE/{run_id}_cand/summary.json   → candidate 指标（通常先取这个）
+      runs/BAG_REPLAY/{run_id}/compare.json   → F 门对比
+      runs/BAG_REPLAY/{run_id}/summary.json   → 可能存在（直接模式）
     """
     result = {}
     for suffix in ("_cand", "_base", ""):
@@ -205,13 +207,13 @@ def _read_result(run_id):
                     data = json.loads(out)
                     if not result:
                         result = data
-                    elif suffix == "_base":
+                    elif suffix == "_base" and "motion" in data:
                         result["baseline_summary"] = data
                 except ValueError:
                     pass
                 if result and suffix != "":
                     break
-    # 也读 compare.json（F 门对比）
+    # F 门对比
     rc, out, _ = _exec(
         f"cat {WS_IN_CONTAINER}/runs/BAG_REPLAY/{run_id}/compare.json 2>/dev/null",
         check=False)
