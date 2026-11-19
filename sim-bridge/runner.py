@@ -37,7 +37,7 @@ def _exec(cmd, timeout=120, check=True):
 def extract_init_pose(bag_path):
     """bag_path 为容器内路径。返回 {x,y,yaw,samples,...}。"""
     rc, out, err = _exec(
-        "source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
+        "source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
         f"python3 {WS_IN_CONTAINER}/sim/scripts/extract_init_pose.py {bag_path}",
         timeout=180, check=False)
     try:
@@ -188,7 +188,7 @@ def submit(venue, req, run_id, on_status=None):
                 ["docker", "cp", f"{src_dir}", f"{CONTAINER}:{WS_IN_CONTAINER}/variant_tmp/"],
                 check=True, capture_output=True)
 
-        cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
+        cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
                f"BLINE_WS={WS_IN_CONTAINER}/variant_tmp "
                f"python3 {WS_IN_CONTAINER}/variant_tmp/sim/scripts/b_line_run.py "
                f"{run_id} '' {scene['duration_s']} {cpath} "

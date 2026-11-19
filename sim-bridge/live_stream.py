@@ -35,7 +35,7 @@ class LiveStream:
     def start(self):
         from live_adapter import TimelineAdapter
         self._adapter = TimelineAdapter(self.front_dist, self.half_angle)
-        cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
+        cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
                f"python3 -u {BRIDGE_SCRIPT} --duration {self.duration} "
                f"--line {self.line} --run-id {self.run_id}")
         self._proc = subprocess.Popen(
@@ -46,18 +46,43 @@ class LiveStream:
         return self
 
     def _pump(self):
-        """读 stdout 逐行解析；非 JSON 行（ROS 日志）丢弃。"""
+        """读 stdout 逐行解析；非 JSON 行（ROS 日志）丢弃。
+
+        stderr 用独立线程持续收集——否则 pipe 满会阻塞子进程，且崩溃原因丢失。
+        """
         if self._proc is None:
             return
+
+        def drain_stderr():
+            try:
+                for line in self._proc.stderr:
+                    line = line.rstrip()
+                    if line:
+                        self._stderr.append(line)
+                        del self._stderr[:-40]   # 只留最后 40 行
+            except (ValueError, OSError):
+                pass
+
+        err_thread = threading.Thread(target=drain_stderr, daemon=True)
+        err_thread.start()
+
         for line in self._proc.stdout:
             if self._stop.is_set():
                 break
             line = line.strip()
-            if not line or not line.startswith("{"):
+            if not line:
+                continue
+            # 关键：rospy 的日志（"Unable to register with master..."）也走 stdout，
+            # 不是 stderr。必须留档，否则"为什么没有帧"无法诊断。
+            if not line.startswith("{"):
+                self._stderr.append(line)
+                del self._stderr[:-40]
                 continue
             try:
                 obj = json.loads(line)
             except ValueError:
+                self._stderr.append(f"[bad json] {line[:200]}")
+                del self._stderr[:-40]
                 continue
             for msg in self._adapter.feed(obj):
                 if msg.get("type") in FRAME_TYPES and self.on_message:
@@ -65,11 +90,7 @@ class LiveStream:
                         self.on_message(msg)
                     except Exception:  # noqa: BLE001  消费方异常不拖垮流
                         pass
-        # 收尾：把 stderr 留档便于排错
-        try:
-            self._stderr = (self._proc.stderr.read() or "").splitlines()[-20:]
-        except (ValueError, OSError):
-            pass
+        err_thread.join(timeout=2)
 
     def stop(self, timeout=10):
         self._stop.set()
@@ -104,7 +125,7 @@ def wait_for_ros(timeout_s=60):
     while time.time() < deadline:
         p = subprocess.run(
             ["docker", "exec", CONTAINER, "bash", "-lc",
-             "source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
+             "source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
              "timeout 3 rosnode list 2>/dev/null | head -1"],
             capture_output=True, text=True)
         if p.returncode == 0 and p.stdout.strip():
