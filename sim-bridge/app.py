@@ -99,6 +99,10 @@ class RunRequest(BaseModel):
     traj_json: dict
     param_overrides: dict = {}
     segment: Optional[dict] = None   # {"from_t": float, "to_t": float} = L2 分段
+    duration_s: Optional[float] = None   # 缺省用场地档案的 duration_s
+    live: bool = True                # T2.3：是否起实时直播流
+    front_dist: float = 3.0          # 前视命中筛选距离（与 L0 同参数）
+    half_angle_deg: float = 28.6     # 视锥半角（与 L0 默认 0.5 rad ≈ 28.6° 对齐）
     notes: str = ""
 
 
@@ -130,7 +134,10 @@ def submit_run(req: RunRequest, x_bridge_token: Optional[str] = Header(None)):
 
 
 def _execute_run(run_id: str, venue: dict, req: dict) -> None:
-    """后台执行 run；把 runner 的状态回调写进 _runs（WS 侧读取）。"""
+    """后台执行 run；把 runner 的状态回调写进 _runs（WS 侧读取）。
+
+    T2.3：执行期间同步起 live_bridge 直播流，把 timeline 消息写进 run 的 frames。
+    """
     def on_status(state, progress, msg):
         with _runs_lock:
             r = _runs.get(run_id)
@@ -139,8 +146,39 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                 r["progress"] = progress
                 r["msg"] = msg
 
+    def on_message(msg):
+        """直播消息 → 写进 run 缓冲（WS 侧轮询发送，天然支持断线重连补帧）。"""
+        with _runs_lock:
+            r = _runs.get(run_id)
+            if not r:
+                return
+            t = msg.get("type")
+            if t == "frame":
+                r["frames"].append(msg)
+            elif t == "front_hits":
+                # 挂到最近一帧上（timeline schema：front_hits 随帧捎带）
+                if r["frames"]:
+                    r["frames"][-1]["front_hits"] = msg.get("hits")
+                    r["frames"][-1]["first_hit_dist"] = msg.get("first_hit_dist")
+            elif t == "path":
+                r["path"] = msg.get("path")
+            elif t == "obstacles":
+                r["obstacles"] = msg.get("obstacles")
+            elif t == "status" and "progress" in msg:
+                r["progress"] = msg["progress"]
+                if msg.get("state"):
+                    r["state"] = msg["state"]
+
+    live = None
     try:
         import runner
+        from live_stream import LiveStream, wait_for_ros
+
+        # 直播流先起（它自己会等 ROS master），执行链随后启动
+        live = LiveStream(run_id, duration=float(req.get("duration_s") or 120),
+                          line="B", on_message=on_message)
+        live.start()
+
         result = runner.submit(venue, req, run_id, on_status=on_status)
         with _runs_lock:
             r = _runs.get(run_id)
@@ -160,6 +198,13 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
             if r:
                 r["state"] = "failed"
                 r["error"] = {"code": code, "msg": detail}
+    finally:
+        if live is not None:
+            live.stop(timeout=5)
+            with _runs_lock:
+                r = _runs.get(run_id)
+                if r:
+                    r["live_stderr_tail"] = live.stderr_tail()[-5:]
 
 
 def _record_to_metrics(rec: dict) -> dict:
@@ -237,6 +282,7 @@ async def run_stream(ws: WebSocket, run_id: str):
             await ws.send_json({"type": "frame", **frames[i]})
         last_sent = len(frames)
         if state in ("done", "failed"):
+            # metrics 已由 _record_to_metrics 生成，按契约单独下发一次
             if metrics and state == "done":
                 await ws.send_json({"type": "metrics", **metrics})
             await ws.send_json({"type": "status", "state": state, "progress": 1.0,

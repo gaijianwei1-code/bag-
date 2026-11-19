@@ -18,7 +18,7 @@ ok()   { printf "  \033[32m✓ %s\033[0m\n" "$1"; }
 bad()  { printf "  \033[31m✗ %s\033[0m\n" "$1"; FAIL=$((FAIL+1)); }
 
 # ---------- 1. 主构建 ----------
-step "1/5 主构建（MapTool.app）"
+step "1/6 主构建（MapTool.app）"
 cd "$ROOT" || exit 1
 if cmake -S maptool-sim/mac-tool-src -B build -DCMAKE_PREFIX_PATH="$TC" > /dev/null 2>&1 \
    && cmake --build build -j4 > /tmp/blz_build.log 2>&1; then
@@ -28,7 +28,7 @@ else
 fi
 
 # ---------- 2. 冒烟工程构建 ----------
-step "2/5 冒烟工程构建（core + UI 集成 + 前视回归）"
+step "2/6 冒烟工程构建（core + UI 集成 + 前视回归）"
 SMOKE_SRC=/tmp/blz_smoke_src
 rm -rf "$SMOKE_SRC" && mkdir -p "$SMOKE_SRC"
 cp "$ROOT/maptool-sim/CMakeLists_smoke.txt" "$SMOKE_SRC/CMakeLists.txt"
@@ -45,7 +45,7 @@ else
 fi
 
 # ---------- 3. core 单元 ----------
-step "3/5 test_core（投影 + raycast 18 断言）"
+step "3/6 test_core（投影 + raycast 18 断言）"
 if "$SMOKE_SRC/out/test_core" > /tmp/blz_t1.log 2>&1; then
     grep -E "bench:" /tmp/blz_t1.log | sed 's/^/  /'
     ok "test_core PASS"
@@ -54,7 +54,7 @@ else
 fi
 
 # ---------- 4. UI 集成（标准样本） ----------
-step "4/5 test_ui_integration（标准样本 pgm+json）"
+step "4/6 test_ui_integration（标准样本 pgm+json）"
 if [ -f "$SAMPLE/1793346971223.pgm" ]; then
     if "$SMOKE_SRC/out/test_ui_integration" "$SAMPLE/1793346971223.pgm" "$SAMPLE/1793347176294.json" > /tmp/blz_t2.log 2>&1; then
         ok "test_ui_integration PASS"
@@ -66,7 +66,7 @@ else
 fi
 
 # ---------- 5. 前视回归（真实点云） ----------
-step "5/5 test_fov_regression（真实 pcd + 场景 clear 悬垂/z 值回归）"
+step "5/6 test_fov_regression（真实 pcd + 场景 clear 悬垂/z 值回归）"
 if [ -f "$PCD" ]; then
     if "$SMOKE_SRC/out/test_fov_regression" "$PCD" > /tmp/blz_t3.log 2>&1; then
         ok "test_fov_regression PASS"
@@ -78,7 +78,7 @@ else
 fi
 
 # ---------- 6. bridge pytest ----------
-step "6/6 sim-bridge pytest（30 用例，含 T2.2 runner）"
+step "6/6 sim-bridge pytest（43 用例：T2.1 接口/T2.2 runner/T2.3 直播；docker 用例默认跳过）"
 cd "$ROOT/sim-bridge" || exit 1
 if [ -x .venv/bin/python ]; then
     if ./.venv/bin/python -m pytest -q > /tmp/blz_pytest.log 2>&1; then
