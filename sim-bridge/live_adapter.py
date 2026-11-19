@@ -70,6 +70,9 @@ class TimelineAdapter:
         self._pt_seq = 0
         self._last_path = None
         self._last_obstacles = None
+        # T3.1: 最近一次观测到的 lookahead/carrot（由 state 消息捎带，见下）
+        self.lookahead = None
+        self.carrot = None
 
     def feed(self, obj):
         """输入一条 live_bridge JSON 对象，返回 timeline 消息列表（可能为空）。"""
@@ -88,6 +91,13 @@ class TimelineAdapter:
         if t == "obstacles":
             self._last_obstacles = obj.get("obstacles")
             return [{"type": "obstacles", "obstacles": self._last_obstacles}]
+        # T3.1 扩展：独立观测节点产出的 lookahead / carrot
+        if t == "lookahead":
+            self.lookahead = obj.get("dist")
+            return []
+        if t == "carrot":
+            self.carrot = obj.get("xy")
+            return []
         return []
 
     def _on_state(self, obj):
@@ -98,9 +108,9 @@ class TimelineAdapter:
             "t": obj.get("t", 0.0),
             "x": obj["x"], "y": obj["y"], "yaw": obj.get("yaw", 0.0),
             "speed": obj.get("speed", 0.0),
-            "lookahead": obj.get("lookahead"),
+            "lookahead": obj.get("lookahead", self.lookahead),
             "loc_score": obj.get("loc_score"),
-            "carrot": obj.get("carrot"),
+            "carrot": obj.get("carrot", self.carrot),
             "front_hits": obj.get("front_hits"),
         }
         # progress 属 status 语义，单独发一条便于 UI 进度条

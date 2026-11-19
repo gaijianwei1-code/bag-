@@ -69,6 +69,13 @@ else:
 nframe = sum(1 for m in frames if m["type"] == "frame")
 nhit = sum(1 for m in frames if m["type"] == "front_hits")
 print(f"[5] 直播消息: {len(frames)} 条（frame={nframe}, front_hits={nhit}）")
+# T3.1：统计 lookahead/carrot 填充率
+la = [m.get("lookahead") for m in frames if m["type"] == "frame"]
+la_ok = [v for v in la if v is not None]
+car_ok = [m for m in frames if m["type"] == "frame" and m.get("carrot")]
+print(f"    lookahead 填充: {len(la_ok)}/{len(la)} 帧"
+      + (f"，范围 [{min(la_ok):.3f}, {max(la_ok):.3f}] m，均值 {sum(la_ok)/len(la_ok):.3f}" if la_ok else ""))
+print(f"    carrot 填充: {len(car_ok)}/{len(la)} 帧")
 if live is not None:
     print(f"    live 诊断尾巴: {live.stderr_tail()[-3:]}")
 

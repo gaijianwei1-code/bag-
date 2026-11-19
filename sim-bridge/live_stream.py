@@ -30,7 +30,9 @@ class LiveStream:
         self.half_angle = half_angle
         self.on_message = on_message
         self._proc = None
+        self._proc_obs = None
         self._thread = None
+        self._thread_obs = None
         self._stop = threading.Event()
         self._adapter = None
         self._stderr = []
@@ -38,16 +40,53 @@ class LiveStream:
     def start(self):
         from live_adapter import TimelineAdapter
         self._adapter = TimelineAdapter(self.front_dist, self.half_angle)
-        cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
-               f"export ROS_MASTER_URI={ROS_MASTER_URI}; "
-               f"python3 -u {BRIDGE_SCRIPT} --duration {self.duration} "
+        src = ("source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
+               "source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
+               f"export ROS_MASTER_URI={ROS_MASTER_URI}; ")
+
+        # 主进程：live_bridge（位姿/点云/path/obstacles）
+        cmd = (src + f"python3 -u {BRIDGE_SCRIPT} --duration {self.duration} "
                f"--line {self.line} --run-id {self.run_id}")
         self._proc = subprocess.Popen(
             ["docker", "exec", CONTAINER, "bash", "-lc", cmd],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+        # T3.1 伴随进程：lookahead 观测（补 lookahead_dist / carrot）
+        # 与主进程共用同一 ROS master；无 master 时它自己会报错退出，不影响主流程
+        obs = (src + f"python3 -u {WS_IN_CONTAINER}/sim/scripts/lookahead_observer.py")
+        self._proc_obs = subprocess.Popen(
+            ["docker", "exec", CONTAINER, "bash", "-lc", obs],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
+        self._thread_obs = threading.Thread(target=self._pump_obs, daemon=True)
+        self._thread_obs.start()
         return self
+
+    def _pump_obs(self):
+        """读 lookahead 观测进程的 JSON 行，交给同一适配器。"""
+        if self._proc_obs is None:
+            return
+        try:
+            for line in self._proc_obs.stdout:
+                if self._stop.is_set():
+                    break
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                for msg in self._adapter.feed(obj):
+                    if msg.get("type") in FRAME_TYPES and self.on_message:
+                        try:
+                            self.on_message(msg)
+                        except Exception:  # noqa: BLE001
+                            pass
+        except (ValueError, OSError):
+            pass
 
     def _pump(self):
         """读 stdout 逐行解析；非 JSON 行（ROS 日志）丢弃。
@@ -98,15 +137,16 @@ class LiveStream:
 
     def stop(self, timeout=10):
         self._stop.set()
-        if self._proc and self._proc.poll() is None:
-            # docker exec 的子进程随容器内进程退出；这里先温和终止宿主机端
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-        if self._thread:
-            self._thread.join(timeout=timeout)
+        for p in (self._proc, self._proc_obs):
+            if p and p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        for th in (self._thread, self._thread_obs):
+            if th:
+                th.join(timeout=timeout)
 
     def close(self):
         self.stop()

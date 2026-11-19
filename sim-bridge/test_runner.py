@@ -37,8 +37,11 @@ def _init_pose():
 def test_build_scene_basic():
     s = R.build_scene(_venue(), {}, _init_pose(), "run1")
     assert s["map_dir"] == "/root/catkin_ws/scenes/scenario_x"
-    assert s["bag"].endswith("evidence.bag")
     assert s["line"] == "B"
+    # 关键回归锁：bag 只用于提取初始位姿，绝不能进 scene 传给 launch
+    # （2026-11-19 实测：传 bag 会让 planner 绕过 computeVelocityCommands）
+    assert "bag" not in s, "scene 不得包含 bag 字段（会切换成回放位姿模式）"
+    assert s["trajectory"].endswith("traj.json")
 
 
 def test_build_scene_init_pose_from_bag():

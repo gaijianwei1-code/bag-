@@ -69,7 +69,11 @@ def build_scene(venue, req, init_pose, run_id):
         "world": c.get("world") or "",
         "map_dir": c["map_dir"],
         "trajectory": c["trajectory"],
-        "bag": c["bag"],
+        # 关键：不把 bag 传给 launch。
+        # bag 的唯一用途是"提取初始位姿"（既定决定 2），不应让仿真切换成回放位姿模式。
+        # 2026-11-19 实测：传 bag 时 planner 从不进入 computeVelocityCommands
+        # （lookahead_point/theta/received_global_plan 四个话题全空，只有 vehicle_cmd 有数据），
+        # 说明控制链被绕过。历史可用的 scene（b_line_20261030_edge.yaml）也没有这个字段。
         "duration_s": float(req.get("duration_s") or venue.get("duration_s") or 120),
         "seed": 0,
         # 初始位姿来自 bag 自动提取，不来自人
