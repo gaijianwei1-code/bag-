@@ -78,10 +78,10 @@ else
 fi
 
 # ---------- 6. bridge pytest ----------
-step "6/6 sim-bridge pytest（21 用例）"
+step "6/6 sim-bridge pytest（30 用例，含 T2.2 runner）"
 cd "$ROOT/sim-bridge" || exit 1
 if [ -x .venv/bin/python ]; then
-    if ./.venv/bin/python -m pytest test_bridge.py -q > /tmp/blz_pytest.log 2>&1; then
+    if ./.venv/bin/python -m pytest -q > /tmp/blz_pytest.log 2>&1; then
         tail -1 /tmp/blz_pytest.log | sed 's/^/  /'
         ok "bridge pytest PASS"
     else

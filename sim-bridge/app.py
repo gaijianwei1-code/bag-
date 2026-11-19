@@ -119,9 +119,73 @@ def submit_run(req: RunRequest, x_bridge_token: Optional[str] = Header(None)):
             raise HTTPException(409, "已有 run 在跑（首版单并发）")
         run_id = f"{req.venue_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
         _runs[run_id] = {"state": "queued", "progress": 0.0, "frames": [],
-                         "metrics": None, "req": req.model_dump()}
-    # T2.2 在此起线程调 b_line_run；当前只登记
+                         "metrics": None, "req": req.model_dump(),
+                         "init_pose": None, "record": None, "error": None}
+
+    # T2.2：异步执行（首版单并发已在上面守卫）
+    th = threading.Thread(target=_execute_run, args=(run_id, venue, req.model_dump()),
+                          daemon=True)
+    th.start()
     return {"run_id": run_id}
+
+
+def _execute_run(run_id: str, venue: dict, req: dict) -> None:
+    """后台执行 run；把 runner 的状态回调写进 _runs（WS 侧读取）。"""
+    def on_status(state, progress, msg):
+        with _runs_lock:
+            r = _runs.get(run_id)
+            if r:
+                r["state"] = state
+                r["progress"] = progress
+                r["msg"] = msg
+
+    try:
+        import runner
+        result = runner.submit(venue, req, run_id, on_status=on_status)
+        with _runs_lock:
+            r = _runs.get(run_id)
+            if r:
+                r["init_pose"] = result.get("init_pose")
+                r["record"] = result.get("record")
+                r["commit"] = result.get("commit")
+                rec = result.get("record") or {}
+                r["metrics"] = _record_to_metrics(rec)
+                r["state"] = "done"
+                r["progress"] = 1.0
+    except Exception as e:  # noqa: BLE001
+        code = getattr(e, "code", "REPLAY_FAILED")
+        detail = getattr(e, "detail", str(e))
+        with _runs_lock:
+            r = _runs.get(run_id)
+            if r:
+                r["state"] = "failed"
+                r["error"] = {"code": code, "msg": detail}
+
+
+def _record_to_metrics(rec: dict) -> dict:
+    """run_record → timeline metrics（T0.1 §3 的 8 项口径，缺的置 null）。"""
+    keys = {
+        "tracking_rms": ("tracking_rms",),
+        "tracking_signed_mean": ("tracking_signed_mean",),
+        "planner_avg_dev": ("planner_avg_dev", "planner_mean_dev"),
+        "theta_rms": ("theta_rms",),
+        "speed_diff_pct": ("speed_diff_pct",),
+        "min_clearance_diff": ("min_clearance_diff",),
+        "travel_diff_pct": ("travel_diff_pct",),
+        "collision_count": ("collision_count", "collisions"),
+    }
+    flat = {}
+    for section in ("metrics", "analysis", "gates", "result"):
+        v = rec.get(section)
+        if isinstance(v, dict):
+            flat.update(v)
+    flat.update({k: v for k, v in rec.items() if not isinstance(v, (dict, list))})
+
+    out = {}
+    for name, aliases in keys.items():
+        out[name] = next((flat[a] for a in aliases if a in flat), None)
+    out["gates"] = flat.get("gates")
+    return out
 
 
 @app.get("/runs/{run_id}")
@@ -132,7 +196,9 @@ def get_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
         if not run:
             raise HTTPException(404, f"run 不存在：{run_id}")
         return {"run_id": run_id, "state": run["state"], "progress": run["progress"],
-                "metrics": run["metrics"]}
+                "metrics": run["metrics"], "init_pose": run.get("init_pose"),
+                "commit": run.get("commit"), "error": run.get("error"),
+                "msg": run.get("msg", "")}
 
 
 @app.get("/runs/{run_id}/timeline")

@@ -64,7 +64,9 @@ def client(tmp_data, monkeypatch):
     monkeypatch.setattr(A, "VENUES_DIR", os.path.join(tmp_data, "venues"))
     monkeypatch.setattr(A, "RUNS_DIR", os.path.join(tmp_data, "runs"))
     monkeypatch.setattr(A, "_runs", {})  # 隔离 run 状态（防测试间泄漏）
-    monkeypatch.setattr(A, "_venue_banned", None, raising=False)
+    # T2.2：run 提交后异步执行。单测无容器，桩掉执行器让它停在 queued，
+    # 否则 run 立即 failed，并发守卫（只拦 queued/replaying/analyzing）失效。
+    monkeypatch.setattr(A, "_execute_run", lambda *a, **k: None)
     with TestClient(A.app) as c:
         yield c
 

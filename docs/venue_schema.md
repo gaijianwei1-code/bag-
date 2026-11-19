@@ -24,6 +24,14 @@ bags:
     duration_s: 351
     notes: 182° 转向样本
     # init_pose 不在此录入：提交 run 时从 bag 起始时刻 /ndt/current_pose 自动提取（既定决定 2）
+
+# v1.1 新增：容器内路径（roslaunch 只认容器路径，host 路径对它无意义）
+# b_line_run 的输入全靠 scene yaml，这几个字段就是 scene 的 map_dir/trajectory/bag/world
+container:
+  map_dir: /root/catkin_ws/scenes/scenario_1793346971223      # 含 <map>.yaml + .pgm
+  trajectory: /root/catkin_ws/scenes/scenario_1793346971223/1793347176294.json
+  bag: /root/catkin_ws/runs/T08/evidence.bag                  # 初始位姿提取来源
+  world: /root/catkin_ws/scenes/scenario_1793346971223_world/world_obstacles.pcd
 ```
 
 ## 2. 字段定义与校验规则（向导即时校验 + bridge 提交前再校验）
