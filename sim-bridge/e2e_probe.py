@@ -91,6 +91,6 @@ if clean0 != clean1:
     print("FAIL: 主工作区被污染")
     ok = False
 else:
-    print("PASS: 主工作区零污染")
+    print("PASS: 主工作区状态未变（基线干净=真零污染；基线脏=未新增污染）")
 print("\nE2E PASS" if ok else "\nE2E FAIL")
 sys.exit(0 if ok else 1)
