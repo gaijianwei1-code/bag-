@@ -201,7 +201,7 @@ def submit(venue, req, run_id, on_status=None):
                f"BLINE_WS={WS_IN_CONTAINER}/variant_tmp "
                f"python3 {WS_IN_CONTAINER}/variant_tmp/sim/scripts/b_line_run.py "
                f"{run_id} '' {scene['duration_s']} {cpath} "
-               f"{ps_dir} ''")
+               f"{ps_dir}")
         rc, out, err = _exec(cmd, timeout=max(300, int(scene["duration_s"]) * 4),
                              check=False)
         if rc != 0:
