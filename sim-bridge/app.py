@@ -326,16 +326,25 @@ async def run_stream(ws: WebSocket, run_id: str):
             while last_sent < len(frames):
                 f = frames[last_sent]
                 t = float(f.get("t") or 0.0)
-                if t <= replay_clock + 0.25:      # 0.25s 前瞻，避免卡顿
+                if t <= replay_clock + 0.15:      # 0.15s 前瞻（减少每批帧数，动画更流畅）
                     batch.append(f)
                     last_sent += 1
                 else:
                     break
             for f in batch:
                 await ws.send_json({"type": "frame", **f})
+            # 每批发一条回放进度，让 UI 显示"播放中 xx%"
+            if batch:
+                pct = min(0.99, last_sent / max(1, len(frames)))
+                await ws.send_json({"type": "status", "state": "replaying",
+                                    "progress": round(pct, 3),
+                                    "msg": f"回放 {last_sent}/{len(frames)}"})
             if last_sent < len(frames):
-                await asyncio.sleep(0.2)
-                replay_clock += 0.2
+                # 用真实帧间隔 sleep（而非固定 0.2s），动画速度更接近真实
+                next_t = float(frames[last_sent].get("t") or 0.0)
+                gap = max(0.05, min(1.0, next_t - replay_clock))  # 50ms~1s 之间
+                await asyncio.sleep(gap)
+                replay_clock = next_t
                 continue
             # 全部推完
             if metrics and state == "done":
