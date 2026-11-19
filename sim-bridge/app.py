@@ -220,29 +220,56 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
 
 
 def _record_to_metrics(rec: dict) -> dict:
-    """run_record → timeline metrics（T0.1 §3 的 8 项口径，缺的置 null）。"""
-    keys = {
-        "tracking_rms": ("tracking_rms",),
-        "tracking_signed_mean": ("tracking_signed_mean",),
-        "planner_avg_dev": ("planner_avg_dev", "planner_mean_dev"),
-        "theta_rms": ("theta_rms",),
-        "speed_diff_pct": ("speed_diff_pct",),
-        "min_clearance_diff": ("min_clearance_diff",),
-        "travel_diff_pct": ("travel_diff_pct",),
-        "collision_count": ("collision_count", "collisions"),
-    }
-    flat = {}
-    for section in ("metrics", "analysis", "gates", "result"):
-        v = rec.get(section)
-        if isinstance(v, dict):
-            flat.update(v)
-    flat.update({k: v for k, v in rec.items() if not isinstance(v, (dict, list))})
+    """run 指标 → timeline metrics（T0.1 §3 口径）。
 
-    out = {}
-    for name, aliases in keys.items():
-        out[name] = next((flat[a] for a in aliases if a in flat), None)
-    out["gates"] = flat.get("gates")
-    return out
+    真实数据源是 `summary.json`（b_line_run 末尾生成），不是 run_record.json。
+    summary.json 结构（2026-11-19 实测）：
+      motion:     {travel_m, path_length_m, end_error_m, progress_peak, progress_100}
+      edge_lateral: {count, rms, max, mean_signed, p95_abs}   ← 横向偏差
+      turn:       null | {...}
+      localization: {status, reason}
+      commands:   {count, nonzero, mean_speed, max_speed}
+      obstacles:  {status, reason}
+      task:       {goal_reached_count, result_status_counts, ...}
+    """
+    if not rec:
+        return {k: None for k in (
+            "travel_m", "path_length_m", "end_error_m", "progress_peak",
+            "edge_lateral_rms", "edge_lateral_max", "edge_lateral_mean_signed",
+            "cmd_count", "cmd_nonzero", "mean_speed", "max_speed",
+            "goal_reached_count", "gates")}
+
+    motion = rec.get("motion") or {}
+    lat = rec.get("edge_lateral") or {}
+    cmds = rec.get("commands") or {}
+    task = rec.get("task") or {}
+
+    def r(v, nd=4):
+        return None if v is None else round(float(v), nd)
+
+    # 派生判定：车是否真的动了（这是 W16 虚拟雷达问题的直接表征）
+    travel = motion.get("travel_m")
+    moved = (travel is not None and float(travel) > 0.1)
+
+    return {
+        "travel_m": r(travel),
+        "path_length_m": r(motion.get("path_length_m")),
+        "end_error_m": r(motion.get("end_error_m")),
+        "progress_peak": r(motion.get("progress_peak"), 2),
+        "progress_100": bool(motion.get("progress_100")),
+        "edge_lateral_rms": r(lat.get("rms")),
+        "edge_lateral_max": r(lat.get("max")),
+        "edge_lateral_mean_signed": r(lat.get("mean_signed")),
+        "cmd_count": cmds.get("count"),
+        "cmd_nonzero": cmds.get("nonzero"),
+        "mean_speed": r(cmds.get("mean_speed")),
+        "max_speed": r(cmds.get("max_speed")),
+        "goal_reached_count": task.get("goal_reached_count"),
+        "moved": moved,
+        # 综合判定（替代原来的 gates 字段）
+        "gates": ("未达标：车未移动（虚拟雷达判满障碍）" if not moved
+                  else "已移动，指标待完整评估"),
+    }
 
 
 @app.get("/runs/{run_id}")

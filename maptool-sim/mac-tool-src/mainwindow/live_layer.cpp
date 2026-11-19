@@ -425,10 +425,20 @@ void LiveLayer::onTextMessage(const QString& msg)
     }
 
     if (type == QStringLiteral("metrics")) {
+        // 指标：行程 / 偏差 RMS / 命令数 / 综合判定
         const QString gates = o.value(QStringLiteral("gates")).toString();
+        auto num = [&](const char* k) {
+            const QJsonValue v = o.value(QLatin1String(k));
+            return v.isNull() || v.isUndefined() ? QStringLiteral("-")
+                                                 : QString::number(v.toDouble(), 'f', 3);
+        };
+        QString detail = QStringLiteral("行程 %1/%2 m  偏差RMS %3  命令 %4/%5")
+                             .arg(num("travel_m")).arg(num("path_length_m"))
+                             .arg(num("edge_lateral_rms"))
+                             .arg(num("cmd_nonzero")).arg(num("cmd_count"));
         m_state = QStringLiteral("done");
         emit stateChanged(m_state, 1.0,
-                          gates.isEmpty() ? QStringLiteral("完成") : gates);
+                          gates.isEmpty() ? detail : gates + QStringLiteral("  ") + detail);
         return;
     }
 }

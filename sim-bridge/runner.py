@@ -207,8 +207,8 @@ def submit(venue, req, run_id, on_status=None):
         if rc != 0:
             raise RunError("REPLAY_FAILED", f"rc={rc}: {err[-600:]}")
 
-        status("analyzing", 0.85, "读取 run_record")
-        record = _read_record(run_id)
+        status("analyzing", 0.85, "读取 summary 指标")
+        record = _read_summary(run_id)
         status("done", 1.0, "完成")
         return {"run_id": run_id, "init_pose": init_pose, "scene": scene,
                 "commit": commit, "worktree": wt, "record": record}
@@ -216,8 +216,13 @@ def submit(venue, req, run_id, on_status=None):
         cleanup_worktree(wt)
 
 
-def _read_record(run_id):
-    rc, out, _ = _exec(f"cat {WS_IN_CONTAINER}/runs/BLINE/{run_id}/run_record.json",
+def _read_summary(run_id):
+    """读 summary.json（真正的指标来源：motion/edge_lateral/commands/task）。
+
+    注意：run_record.json 只记录输入配置（scene/param_set/adapter），
+    不含运动与偏差指标；F 门那类数据在 summary.json 里。
+    """
+    rc, out, _ = _exec(f"cat {WS_IN_CONTAINER}/runs/BLINE/{run_id}/summary.json",
                        check=False)
     if rc != 0:
         return None
