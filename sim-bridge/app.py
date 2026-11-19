@@ -170,16 +170,28 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                     r["state"] = msg["state"]
 
     live = None
+    live_started = threading.Event()
     try:
         import runner
-        from live_stream import LiveStream, wait_for_ros
+        from live_stream import LiveStream
 
-        # 直播流先起（它自己会等 ROS master），执行链随后启动
-        live = LiveStream(run_id, duration=float(req.get("duration_s") or 120),
-                          line="B", on_message=on_message)
-        live.start()
+        # T2.3 顺序：回放启动（on_status 报 replaying）时才起直播，那时 master 已在。
+        # 反过来会让 live_bridge 在无 master 下空转数十秒后放弃（实测 52s）。
+        def _start_live():
+            nonlocal live
+            if live is not None:
+                return
+            live = LiveStream(run_id, duration=float(req.get("duration_s") or 120),
+                              line="B", on_message=on_message)
+            live.start()
+            live_started.set()
 
-        result = runner.submit(venue, req, run_id, on_status=on_status)
+        def _status(state, progress, msg):
+            on_status(state, progress, msg)
+            if state == "replaying" and not live_started.is_set():
+                threading.Timer(3.0, _start_live).start()   # 给 master 3s 起来
+
+        result = runner.submit(venue, req, run_id, on_status=_status)
         with _runs_lock:
             r = _runs.get(run_id)
             if r:

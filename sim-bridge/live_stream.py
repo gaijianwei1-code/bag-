@@ -10,6 +10,9 @@ import threading
 CONTAINER = "roboneo-sim"
 WS_IN_CONTAINER = "/root/catkin_ws"
 BRIDGE_SCRIPT = f"{WS_IN_CONTAINER}/sim/scripts/live_bridge.py"
+# b_line_run.py 用 `roscore -p 11323` 起自己的 master，不是默认 11311。
+# live_bridge 必须指向同一个端口，否则永远 "Unable to register with master"
+ROS_MASTER_URI = "http://localhost:11323"
 
 # 需要转发的 timeline 消息类型（T0.1 schema + path/obstacles 扩展）
 FRAME_TYPES = {"frame", "front_hits", "status", "path", "obstacles"}
@@ -36,6 +39,7 @@ class LiveStream:
         from live_adapter import TimelineAdapter
         self._adapter = TimelineAdapter(self.front_dist, self.half_angle)
         cmd = (f"source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
+               f"export ROS_MASTER_URI={ROS_MASTER_URI}; "
                f"python3 -u {BRIDGE_SCRIPT} --duration {self.duration} "
                f"--line {self.line} --run-id {self.run_id}")
         self._proc = subprocess.Popen(
@@ -119,16 +123,24 @@ class LiveStream:
 
 
 def wait_for_ros(timeout_s=60):
-    """等容器内 roscore 就绪（回放启动后才有）。返回 bool。"""
+    """等容器内 ROS master 就绪。用法：在回放启动后调用。返回 bool。
+
+    用 rosparam list 探活（比 rosnode list 快且不依赖节点已注册）。
+    """
     import time
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        p = subprocess.run(
-            ["docker", "exec", CONTAINER, "bash", "-lc",
-             "source /opt/ros/noetic/setup.bash >/dev/null 2>&1; source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
-             "timeout 3 rosnode list 2>/dev/null | head -1"],
-            capture_output=True, text=True)
-        if p.returncode == 0 and p.stdout.strip():
+        try:
+            p = subprocess.run(
+                ["docker", "exec", CONTAINER, "bash", "-lc",
+                 "source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
+                 f"export ROS_MASTER_URI={ROS_MASTER_URI}; "
+                 "rosparam list /rosdistro 2>/dev/null | head -1"],
+                capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            time.sleep(1.0)
+            continue
+        if p.stdout.strip():
             return True
-        time.sleep(2.0)
+        time.sleep(1.0)
     return False
