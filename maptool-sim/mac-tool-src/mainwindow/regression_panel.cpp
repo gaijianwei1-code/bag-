@@ -20,6 +20,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QUrl>
+#include <QColor>
 
 RegressionPanel::RegressionPanel(const QString& bridgeUrl, const QString& token,
                                  QWidget* parent)
@@ -182,6 +183,14 @@ void RegressionPanel::fetchVenues()
 
 void RegressionPanel::submitRun()
 {
+    // 拦不可跑的场地：直接提示，不发请求（发了也是 0.1 秒后 failed，
+    // 用户再去连直播只会"没反应"，体验极差）
+    if (!m_comboBag->currentData(Qt::UserRole + 2).toBool()) {
+        showError(tr("这个场地缺少 container 配置（bag/map_dir），无法真正跑 run。\n"
+                     "请改选「标准回归样本」场地。"));
+        return;
+    }
+
     QJsonObject body;
     // venue_id 从 bag 的 userData 里取（fetchVenues 时存入）
     body["venue_id"] = m_comboBag->currentData(Qt::UserRole + 1).toString();
@@ -264,10 +273,16 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
     }
     else if (url.endsWith("/venues")) {
         m_comboBag->clear();
+        m_venueRunnable.clear();
         const QJsonArray arr = doc.array();
         for (const auto& v : arr) {
             const QJsonObject o = v.toObject();
             const QString vid = o["venue_id"].toString();
+            // 跳过不可跑的场地（缺 container.bag 等），否则用户选了它
+            // 提交后 run 立刻 failed，连直播只会"没反应"。
+            const bool runnable = o.contains("runnable")
+                                  ? o["runnable"].toBool() : true;
+            m_venueRunnable[vid] = runnable;
             // 获取该场地的 bags
             QNetworkRequest req{QUrl(m_bridgeUrl + "/venues/" + vid + "/bags")};
             req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
@@ -279,13 +294,22 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
         // 路径形如 /venues/{vid}/bags —— 必须用 section("/bags", 0, 0) 只取第一段，
         // 否则 end 默认 -1 会连 "/bags" 一起返回，venue_id 变成 "xxx/bags" → POST /runs 404
         const QString vid = url.section("/venues/", 1).section("/bags", 0, 0);
+        const bool runnable = m_venueRunnable.value(vid, true);
         for (const auto& v : arr) {
             const QJsonObject o = v.toObject();
             const QString bag = o["bag"].toString();
-            m_comboBag->addItem(bag, bag);
+            // 不可跑的场地仍然列出，但标注清楚，避免用户选到才失败
+            const QString label = runnable ? bag
+                                           : bag + tr("（场地缺 container，跑不了）");
+            m_comboBag->addItem(label, bag);
             // 存 venue_id 到 UserRole+1
             int idx = m_comboBag->count() - 1;
             m_comboBag->setItemData(idx, vid, Qt::UserRole + 1);
+            m_comboBag->setItemData(idx, runnable, Qt::UserRole + 2);
+            if (!runnable) {
+                // 灰显，视觉上区分
+                m_comboBag->setItemData(idx, QColor(150, 150, 150), Qt::ForegroundRole);
+            }
         }
         updateSubmitState();
     }

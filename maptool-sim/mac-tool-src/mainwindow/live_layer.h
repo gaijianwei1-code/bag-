@@ -88,6 +88,7 @@ public:
     int hitTotal() const { return m_hitTotal; }
     QString lastError() const { return m_lastError; }
     bool overlayAlive() const { return m_overlayGuard != nullptr; }
+    bool overlayHasVehicle() const { return m_overlay && m_overlay->hasVehicle(); }
     double overlayZ() const { return m_overlayGuard ? m_overlayGuard->zValue() : -999.0; }
     QString state() const { return m_state; }
 

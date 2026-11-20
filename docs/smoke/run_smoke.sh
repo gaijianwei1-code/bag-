@@ -85,6 +85,24 @@ else
     bad "test_live_layer 失败"; grep -E "^FAIL" /tmp/blz_t4.log | head -5
 fi
 
+# ---------- 5.6 直播跟车真实 WS 连接（补测「点连接直播没响应」）----------
+step "5.6 test_live_ws（真实 WS 握手 + 出帧 + 状态机）"
+RUN_ID=""
+if curl -sf "http://127.0.0.1:9100/health" -H "X-Bridge-Token: dev-token" > /dev/null 2>&1; then
+    RUN_ID=$(curl -s -X POST "http://127.0.0.1:9100/runs" \
+        -H "X-Bridge-Token: dev-token" -H "Content-Type: application/json" \
+        -d '{"venue_id":"scenario-1793346971223","bag":"bags/scenario-1793346971223.bag","branch":"main","traj_json":{},"duration_s":30}' \
+        2>/dev/null | sed -n 's/.*"run_id":"\([^"]*\)".*/\1/p')
+fi
+if [ -z "$RUN_ID" ]; then
+    ok "跳过 test_live_ws（bridge 未运行或无可用 run）"
+elif "$SMOKE_SRC/out/test_live_ws" ws://127.0.0.1:9100 "$RUN_ID" dev-token > /tmp/blz_t5.log 2>&1; then
+    grep -c "^ok:" /tmp/blz_t5.log | sed 's/^/  断言通过 /'
+    ok "test_live_ws PASS"
+else
+    bad "test_live_ws 失败"; grep -E "^FAIL" /tmp/blz_t5.log | head -5
+fi
+
 # ---------- 6. bridge pytest ----------
 step "6/6 sim-bridge pytest（43 用例：T2.1 接口/T2.2 runner/T2.3 直播；docker 用例默认跳过）"
 cd "$ROOT/sim-bridge" || exit 1

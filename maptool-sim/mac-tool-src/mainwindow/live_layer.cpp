@@ -348,17 +348,33 @@ void LiveLayer::disconnectNow()
 
 void LiveLayer::onConnected()
 {
-    emit stateChanged(QStringLiteral("connected"), 0.0, QStringLiteral("已连接"));
+    // 必须同时更新 m_state：以前只发信号不改状态，
+    // state() 永远停在 "connecting"，测试和界面判断都会失效。
+    m_state = QStringLiteral("connected");
+    m_lastError.clear();
+    emit stateChanged(m_state, 0.0, QStringLiteral("已连接"));
 }
 
 void LiveLayer::onDisconnected()
 {
-    emit stateChanged(QStringLiteral("disconnected"), 0.0, QStringLiteral("连接断开"));
+    // 已因 run 失败而断开时，保留真实失败原因，不要改成含糊的"连接断开"
+    if (m_state == QStringLiteral("failed") && !m_lastError.isEmpty()) {
+        emit stateChanged(m_state, 0.0, m_lastError);
+    } else {
+        m_state = QStringLiteral("disconnected");
+        emit stateChanged(m_state, 0.0, QStringLiteral("连接断开"));
+    }
     if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
 }
 
 void LiveLayer::onError(const QString& err)
 {
+    // 服务端已明确告知失败原因时，不要再被 socket 的 "远端关闭" 盖掉——
+    // 那会让用户看不到真正的错误（如"缺 container.bag"）。
+    if (m_state == QStringLiteral("failed") && !m_lastError.isEmpty()) {
+        emit stateChanged(m_state, 0.0, m_lastError);
+        return;
+    }
     m_lastError = err;
     emit stateChanged(QStringLiteral("error"), 0.0, err);
 }
@@ -379,6 +395,20 @@ void LiveLayer::onTextMessage(const QString& msg)
         warned = true;
         qWarning("[LiveLayer] m_resolution=0，坐标换算无效！"
                  "请确认已打开 yaml 文件（setMapInfo 需要 resolution/origin）");
+    }
+
+    if (type == QStringLiteral("error")) {
+        // bridge 明确告知失败原因（如场地缺 container.bag）。
+        // 以前不处理这类消息，用户只看到"点连接直播没响应"。
+        const QString msg = o.value(QStringLiteral("msg")).toString();
+        const QString code = o.value(QStringLiteral("code")).toString();
+        m_lastError = code.isEmpty() ? msg
+                                     : QStringLiteral("%1（%2）").arg(msg, code);
+        m_state = QStringLiteral("failed");
+        emit stateChanged(m_state, 0.0, m_lastError);
+        // 让按钮弹起来，用户能再次点击（否则看起来像卡死）
+        if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
+        return;
     }
 
     if (type == QStringLiteral("status")) {

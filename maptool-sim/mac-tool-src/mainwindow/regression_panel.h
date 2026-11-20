@@ -68,6 +68,7 @@ private:
     QString m_token;
     QString m_lastRunId;
     QList<BranchInfo> m_branches;
+    QMap<QString, bool> m_venueRunnable;   // venue_id → 是否可跑（缺 container 则为 false）
 
     QComboBox* m_comboBranch = nullptr;
     QComboBox* m_comboBag = nullptr;

@@ -52,8 +52,14 @@ def list_venues(x_bridge_token: Optional[str] = Header(None)):
     _auth(x_bridge_token)
     out = []
     for v in V.list_venues(VENUES_DIR):
+        # runnable：缺 container.* 的场地（如 T2.1 的 CRUD 样例）无法真正跑 run，
+        # 必须在列表里标出来，否则用户选了它提交成功、连直播却"没反应"。
+        c = v.get("container") or {}
+        missing = [k for k in ("bag", "map_dir") if not c.get(k)]
         out.append({"venue_id": v.get("venue_id"), "name": v.get("name"),
-                    "bag_count": len(v.get("bags", [])), "map_pgm": v.get("map_pgm")})
+                    "bag_count": len(v.get("bags", [])), "map_pgm": v.get("map_pgm"),
+                    "runnable": not missing,
+                    "missing": missing})
     return out
 
 
@@ -368,8 +374,15 @@ async def run_stream(ws: WebSocket, run_id: str):
             if state in ("done", "failed"):
                 if metrics and state == "done":
                     await ws.send_json({"type": "metrics", **metrics})
+                # 失败时必须把原因发出去：否则客户端只看到「远端关闭连接」，
+                # 用户反映「点连接直播没响应」正是这样产生的。
+                err = run.get("error") if run else None
+                if err:
+                    await ws.send_json({"type": "error",
+                                        "code": err.get("code", "RUN_FAILED"),
+                                        "msg": err.get("msg", "run 失败")})
                 await ws.send_json({"type": "status", "state": state, "progress": 1.0,
-                                    "msg": "finished"})
+                                    "msg": (err or {}).get("msg") or "finished"})
                 break
             await asyncio.sleep(0.2)
     except Exception:  # noqa: BLE001  客户端断开等异常静默处理

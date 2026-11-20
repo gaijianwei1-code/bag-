@@ -51,3 +51,15 @@ add_executable(test_live_layer core/tests/test_live_layer.cpp
 target_include_directories(test_live_layer PRIVATE
     core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
 target_link_libraries(test_live_layer Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::WebSockets)
+
+# ---- T2.4 直播跟车「真实 WS 连接」冒烟（补测「点连接直播没响应」）----
+add_executable(test_live_ws core/tests/test_live_ws.cpp
+                              core/grid_projection.cpp
+                              core/fov_raycast.cpp
+                              mac-tool-src/mainwindow/fov_layer.cpp
+                              mac-tool-src/mainwindow/live_layer.cpp
+                              mac-tool-src/items/GraphicsType.cpp
+                              mac-tool-src/dialog/attributeAddDialog.cpp)
+target_include_directories(test_live_ws PRIVATE
+    core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
+target_link_libraries(test_live_ws Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::WebSockets)
