@@ -80,8 +80,9 @@ def test_worktree_creates_and_cleans():
 
 
 def test_worktree_bad_branch():
+    repo = REPO if os.path.isdir(os.path.join(REPO, ".git")) else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with pytest.raises(R.RunError) as e:
-        R.make_worktree("no-such-branch-xyz")
+        R.make_worktree("no-such-branch-xyz", repo=repo)
     assert e.value.code == "BRANCH_NOT_FOUND"
 
 

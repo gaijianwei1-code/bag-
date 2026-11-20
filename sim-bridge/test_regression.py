@@ -32,9 +32,10 @@ def test_branches_api_returns_list():
     from unittest.mock import patch
 
     with patch.object(A, "TOKEN", "dev-token"):
-        # 用 mock 替代 docker 调用
-        with patch.object(R, "_exec") as mock_exec:
-            mock_exec.return_value = (0, "main\nfeature/fix\n", "")
+        with patch.object(R, "list_branches", return_value=[
+            {"branch": "main", "commit": "abc1234", "is_current": True},
+            {"branch": "feature/fix", "commit": "def5678", "is_current": False},
+        ]):
             client = TestClient(A.app)
             r = client.get("/branches", headers={"X-Bridge-Token": "dev-token"})
             assert r.status_code == 200
@@ -88,6 +89,39 @@ def test_submit_without_param_overrides():
     args, base, cand = R.build_replay_args(_venue(), {}, "run1")
     assert base == "baseline_branchB"
     assert cand == "baseline_branchB"
+
+
+def test_build_replay_args_with_param_overrides_uses_tmp_set():
+    """带 param_overrides 时 candidate 参数集切到 .tmp_{run_id}"""
+    args, base, cand = R.build_replay_args(
+        _venue(), {"param_overrides": {"next_goal_tolerance_normal": 1.5}}, "run_xyz")
+    assert base == "baseline_branchB"
+    assert cand == ".tmp_run_xyz"
+    assert ".tmp_run_xyz" in " ".join(args)
+
+
+def test_cancel_active_and_persist(tmp_path, monkeypatch):
+    """cancel_active 应将活跃 run 置为 failed(CANCELLED) 并释放单并发锁"""
+    from fastapi.testclient import TestClient
+    from unittest.mock import patch
+    import app as A
+
+    monkeypatch.setattr(A, "RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(A, "_runs", {
+        "r1": {"state": "replaying", "progress": 0.3, "frames": [], "metrics": None, "error": None}
+    })
+    with patch.object(A, "TOKEN", "dev-token"), patch.object(R, "cancel_active_run") as m_cancel:
+        client = TestClient(A.app)
+        res = client.post("/runs/cancel_active", headers={"X-Bridge-Token": "dev-token"})
+        assert res.status_code == 200
+        assert res.json()["cancelled"] == ["r1"]
+        assert m_cancel.called
+        assert A._runs["r1"]["state"] == "failed"
+        assert A._runs["r1"]["error"]["code"] == "CANCELLED"
+        A._runs.clear()
+        g = client.get("/runs/r1", headers={"X-Bridge-Token": "dev-token"})
+        assert g.status_code == 200
+        assert g.json()["error"]["code"] == "CANCELLED"
 
 
 # ---------- 容器实测（默认跳过） ----------

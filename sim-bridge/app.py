@@ -1,6 +1,7 @@
 """sim-bridge：MapTool ↔ roboneo_sim 的桥接层。
 API 契约见 docs/bridge_api.md。启动：uvicorn app:app --host 0.0.0.0 --port 9100
 """
+import json
 import os
 import uuid
 import threading
@@ -56,8 +57,13 @@ def list_venues(x_bridge_token: Optional[str] = Header(None)):
         # 必须在列表里标出来，否则用户选了它提交成功、连直播却"没反应"。
         c = v.get("container") or {}
         missing = [k for k in ("bag", "map_dir") if not c.get(k)]
+        bags = v.get("bags", [])
+        dur = v.get("duration_s") or (bags[0].get("duration_s") if bags else None) or 60
         out.append({"venue_id": v.get("venue_id"), "name": v.get("name"),
-                    "bag_count": len(v.get("bags", [])), "map_pgm": v.get("map_pgm"),
+                    "bag_count": len(bags), "map_pgm": v.get("map_pgm"),
+                    "map_pcd": v.get("map_pcd"),
+                    "default_param_set": v.get("default_param_set"),
+                    "duration_s": dur,
                     "runnable": not missing,
                     "missing": missing})
     return out
@@ -184,36 +190,41 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
 
     live = None
     live_started = threading.Event()
+    stop_wait = threading.Event()
     try:
         import runner
-        from live_stream import LiveStream
+        from live_stream import LiveStream, wait_for_ros
 
-        # T2.3 顺序：回放启动（on_status 报 replaying）时才起直播，那时 master 已在。
-        # 反过来会让 live_bridge 在无 master 下空转数十秒后放弃（实测 52s）。
-        def _start_live():
+        # T2.3 顺序：回放启动（on_status 报 replaying）后等待 ROS master 就绪再起直播，
+        # 避免固定 sleep 过短导致空转或过长丢帧。
+        def _start_live_when_ready():
             nonlocal live
-            if live is not None:
+            if live_started.is_set() or stop_wait.is_set():
+                return
+            live_started.set()
+            wait_for_ros(timeout_s=30)
+            if stop_wait.is_set():
                 return
             live = LiveStream(run_id, duration=float(req.get("duration_s") or 120),
                               line="B", on_message=on_message)
             live.start()
-            live_started.set()
 
         def _status(state, progress, msg):
             on_status(state, progress, msg)
             if state == "replaying" and not live_started.is_set():
-                threading.Timer(3.0, _start_live).start()   # 给 master 3s 起来
+                threading.Thread(target=_start_live_when_ready, daemon=True).start()
 
         result = runner.submit(venue, req, run_id, on_status=_status)
         with _runs_lock:
             r = _runs.get(run_id)
             if r:
+                if r.get("state") == "failed":
+                    return
                 r["init_pose"] = result.get("init_pose")
                 r["record"] = result.get("record")
                 r["commit"] = result.get("commit")
                 rec = result.get("record") or {}
                 r["metrics"] = _record_to_metrics(rec)
-                print(f"[DEBUG _execute_run] run={run_id} record_keys={list(rec.keys()) if rec else 'None'} motion={rec.get('motion')} metrics_travel={r['metrics'].get('travel_m')}", flush=True)
                 r["state"] = "done"
                 r["progress"] = 1.0
     except Exception as e:  # noqa: BLE001
@@ -221,16 +232,18 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
         detail = getattr(e, "detail", str(e))
         with _runs_lock:
             r = _runs.get(run_id)
-            if r:
+            if r and r.get("state") != "failed":
                 r["state"] = "failed"
                 r["error"] = {"code": code, "msg": detail}
     finally:
+        stop_wait.set()
         if live is not None:
             live.stop(timeout=5)
             with _runs_lock:
                 r = _runs.get(run_id)
                 if r:
                     r["live_stderr_tail"] = live.stderr_tail()[-5:]
+        _persist_run(run_id)
 
 
 def _record_to_metrics(rec: dict) -> dict:
@@ -279,29 +292,96 @@ def _record_to_metrics(rec: dict) -> dict:
     }
 
 
+def _persist_run(run_id: str) -> None:
+    with _runs_lock:
+        r = _runs.get(run_id)
+        if not r:
+            return
+        snap = dict(r)
+    try:
+        d = os.path.join(RUNS_DIR, run_id)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "run.json"), "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def _load_run_if_needed(run_id: str) -> Optional[dict]:
+    with _runs_lock:
+        if run_id in _runs:
+            return _runs[run_id]
+    p = os.path.join(RUNS_DIR, run_id, "run.json")
+    if os.path.isfile(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            with _runs_lock:
+                _runs.setdefault(run_id, data)
+                return _runs[run_id]
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+@app.post("/runs/cancel_active")
+def cancel_active(x_bridge_token: Optional[str] = Header(None)):
+    _auth(x_bridge_token)
+    cancelled = []
+    with _runs_lock:
+        for rid, r in _runs.items():
+            if r.get("state") in ("queued", "replaying", "analyzing"):
+                r["state"] = "failed"
+                r["error"] = {"code": "CANCELLED", "msg": "用户手动中止"}
+                r["msg"] = "用户手动中止"
+                cancelled.append(rid)
+    import runner
+    runner.cancel_active_run()
+    for rid in cancelled:
+        _persist_run(rid)
+    return {"cancelled": cancelled}
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
+    _auth(x_bridge_token)
+    with _runs_lock:
+        r = _runs.get(run_id)
+        if not r:
+            raise HTTPException(404, f"run 不存在：{run_id}")
+        if r.get("state") in ("queued", "replaying", "analyzing"):
+            r["state"] = "failed"
+            r["error"] = {"code": "CANCELLED", "msg": "用户手动中止"}
+            r["msg"] = "用户手动中止"
+    import runner
+    runner.cancel_active_run()
+    _persist_run(run_id)
+    return {"run_id": run_id, "state": "failed"}
+
+
 @app.get("/runs/{run_id}")
 def get_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
     _auth(x_bridge_token)
-    with _runs_lock:
-        run = _runs.get(run_id)
-        if not run:
-            raise HTTPException(404, f"run 不存在：{run_id}")
-        return {"run_id": run_id, "state": run["state"], "progress": run["progress"],
-                "metrics": run["metrics"], "init_pose": run.get("init_pose"),
-                "commit": run.get("commit"), "error": run.get("error"),
-                "msg": run.get("msg", "")}
+    run = _load_run_if_needed(run_id)
+    if not run:
+        raise HTTPException(404, f"run 不存在：{run_id}")
+    return {"run_id": run_id, "state": run["state"], "progress": run["progress"],
+            "metrics": run["metrics"], "init_pose": run.get("init_pose"),
+            "commit": run.get("commit"), "error": run.get("error"),
+            "msg": run.get("msg", "")}
 
 
 @app.get("/runs/{run_id}/timeline")
 def run_timeline(run_id: str, x_bridge_token: Optional[str] = Header(None)):
     _auth(x_bridge_token)
+    run = _load_run_if_needed(run_id)
+    if not run:
+        raise HTTPException(404, f"run 不存在：{run_id}")
     with _runs_lock:
-        run = _runs.get(run_id)
-        if not run:
-            raise HTTPException(404, f"run 不存在：{run_id}")
-        frames = list(run["frames"])
+        frames = list(run.get("frames", []))
+        metrics = run.get("metrics")
     return {"schema": "timeline/v1", "run_id": run_id, "frames": frames,
-            "metrics": run["metrics"]}
+            "metrics": metrics}
 
 
 @app.websocket("/ws/runs/{run_id}/stream")
@@ -315,8 +395,7 @@ async def run_stream(ws: WebSocket, run_id: str):
     import asyncio
 
     await ws.accept()
-    with _runs_lock:
-        run = _runs.get(run_id)
+    run = _load_run_if_needed(run_id)
     if not run:
         await ws.send_json({"type": "error", "code": "RUN_NOT_FOUND",
                             "msg": f"run 不存在：{run_id}"})

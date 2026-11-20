@@ -15,9 +15,11 @@ import shutil
 import subprocess
 import tempfile
 
-CONTAINER = "roboneo-sim"
-WS_IN_CONTAINER = "/root/catkin_ws"
-BASELINE_REPO = os.path.expanduser("~/multi-agent/squad-workspace/roboneo_sim")
+CONTAINER = os.environ.get("SIM_CONTAINER", "roboneo-sim")
+WS_IN_CONTAINER = os.environ.get("SIM_WS_DIR", "/root/catkin_ws")
+BASELINE_REPO = os.environ.get(
+    "BASELINE_REPO", os.path.expanduser("~/multi-agent/squad-workspace/roboneo_sim")
+)
 
 
 class RunError(Exception):
@@ -63,6 +65,8 @@ def build_replay_args(venue, req, run_id):
 
     baseline_ps = venue.get("default_param_set") or "baseline_branchB"
     candidate_ps = req.get("param_set") or baseline_ps
+    if req.get("param_overrides"):
+        candidate_ps = f".tmp_{run_id}"
 
     args = [
         "--mode", "closed",
@@ -78,6 +82,50 @@ def build_replay_args(venue, req, run_id):
     scene_path = c.get("scene_yaml") or f"{WS_IN_CONTAINER}/sim/scenes/b_line_20261030_edge.yaml"
     args.extend(["--scene", scene_path])
     return args, baseline_ps, candidate_ps
+
+
+def _prepare_param_set_with_overrides(base_ps, tmp_ps, overrides):
+    """在容器内基于 base_ps 拷贝出 tmp_ps，并将 param_overrides 写入 YAML。"""
+    import shlex
+    base_dir = f"{WS_IN_CONTAINER}/sim/param_sets/{base_ps}"
+    tmp_dir = f"{WS_IN_CONTAINER}/sim/param_sets/{tmp_ps}"
+    ov_json = json.dumps(overrides, ensure_ascii=False)
+    py_script = (
+        "import json, os, shutil, yaml; "
+        f"src={shlex.quote(base_dir)}; dst={shlex.quote(tmp_dir)}; "
+        "shutil.rmtree(dst, ignore_errors=True); "
+        "shutil.copytree(src, dst); "
+        f"ov=json.loads({shlex.quote(ov_json)}); "
+        "yamls=[f for f in os.listdir(dst) if f.endswith('.yaml')]; "
+        "\nfor k, v in ov.items():\n"
+        "  written=False\n"
+        "  for fn in yamls:\n"
+        "    p=os.path.join(dst, fn)\n"
+        "    with open(p,'r',encoding='utf-8') as f: d=yaml.safe_load(f) or {}\n"
+        "    if isinstance(d, dict) and k in d:\n"
+        "      d[k]=v\n"
+        "      with open(p,'w',encoding='utf-8') as f: yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)\n"
+        "      written=True\n"
+        "  if not written:\n"
+        "    p=os.path.join(dst, 'schedule_goal.yaml')\n"
+        "    d={}\n"
+        "    if os.path.isfile(p):\n"
+        "      with open(p,'r',encoding='utf-8') as f: d=yaml.safe_load(f) or {}\n"
+        "    d[k]=v\n"
+        "    with open(p,'w',encoding='utf-8') as f: yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)\n"
+    )
+    _exec(f"python3 -c {shlex.quote(py_script)}", timeout=30, check=True)
+
+
+def _cleanup_param_set(tmp_ps):
+    if tmp_ps and tmp_ps.startswith(".tmp_"):
+        _exec(f"rm -rf {WS_IN_CONTAINER}/sim/param_sets/{tmp_ps}", check=False)
+
+
+def cancel_active_run():
+    """中止容器内正在运行的回放与直播进程（用于单并发卡死恢复）。"""
+    _exec("pkill -f 'bag_replay|b_line_run|live_bridge|lookahead_observer' || true",
+          timeout=15, check=False)
 
 
 # ---------- 3. 分支快照：worktree --detach ----------
@@ -150,10 +198,16 @@ def submit(venue, req, run_id, on_status=None):
 
     status("queued", 0.15, "建分支快照 worktree")
     wt, commit = make_worktree(req.get("branch", "main"), req.get("commit"))
+    tmp_ps = None
 
     try:
         status("queued", 0.25, "构建 bag_replay 参数")
         args, baseline_ps, candidate_ps = build_replay_args(venue, req, run_id)
+        overrides = req.get("param_overrides") or {}
+        if overrides:
+            base_ps = req.get("param_set") or baseline_ps
+            tmp_ps = candidate_ps
+            _prepare_param_set_with_overrides(base_ps, tmp_ps, overrides)
 
         status("replaying", 0.3, "启动 bag 回放闭环")
         # 分支快照同步进容器（只拷 src/sim 子树）
@@ -185,6 +239,8 @@ def submit(venue, req, run_id, on_status=None):
                 "baseline_param_set": baseline_ps,
                 "candidate_param_set": candidate_ps}
     finally:
+        if tmp_ps:
+            _cleanup_param_set(tmp_ps)
         cleanup_worktree(wt)
 
 

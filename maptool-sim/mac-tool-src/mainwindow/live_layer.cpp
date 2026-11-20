@@ -114,13 +114,6 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
 {
     p->setRenderHint(QPainter::Antialiasing, true);
 
-    // 调试：画一个半透明背景方块证明 overlay 在渲染（T2.4 调试用）
-    if (m_hasVehicle) {
-        p->setPen(Qt::NoPen);
-        p->setBrush(QColor(255, 255, 0, 40));  // 淡黄背景
-        p->drawRect(m_vehicle.x() - 30, m_vehicle.y() - 30, 60, 60);
-    }
-
     // 1. 真值轨迹（灰虚线）
     if (m_truthPath.size() > 1) {
         QPen pen(QColor(140, 140, 140, 200), 0.0, Qt::DashLine);
@@ -162,15 +155,9 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
         };
         QPolygonF tri;
         tri << rot(len, 0) << rot(-len * 0.6, wid) << rot(-len * 0.6, -wid);
-        p->setPen(QPen(QColor(255, 0, 0, 255), 2.0));   // 红色粗边（更醒目）
-        p->setBrush(QColor(0, 100, 255, 255));            // 实心蓝
+        p->setPen(QPen(QColor(255, 255, 255, 230), 1.5));
+        p->setBrush(QColor(0, 110, 255, 235));
         p->drawPolygon(tri);
-        // 调试文字：显示像素坐标
-        p->setPen(QColor(255, 0, 0, 200));
-        p->setFont(QFont("Monospace", 8));
-        p->drawText(m_vehicle + QPointF(16, -16),
-                    QString("(%1,%2)").arg(m_vehicle.x(), 0, 'f', 0)
-                                       .arg(m_vehicle.y(), 0, 'f', 0));
     }
 }
 
@@ -287,6 +274,19 @@ bool LiveLayer::connected() const
     return m_ws && m_ws->state() == QAbstractSocket::ConnectedState;
 }
 
+void LiveLayer::setRunIdAndConnect(const QString& runId)
+{
+    if (m_editRun)
+        m_editRun->setText(runId);
+    const QString baseUrl = m_editUrl ? m_editUrl->text().trimmed() : QStringLiteral("ws://127.0.0.1:9100");
+    const QString token = m_editToken ? m_editToken->text() : QStringLiteral("dev-token");
+    if (m_btnConnect && !m_btnConnect->isChecked()) {
+        m_btnConnect->setChecked(true);
+    } else {
+        startLive(baseUrl, runId, token);
+    }
+}
+
 void LiveLayer::startLive(const QString& baseUrl, const QString& runId, const QString& token)
 {
     disconnectNow();
@@ -294,6 +294,14 @@ void LiveLayer::startLive(const QString& baseUrl, const QString& runId, const QS
         m_lastError = QStringLiteral("地址或 run_id 为空");
         m_state = QStringLiteral("error");       // 不依赖 dock 回调，无 dock 时也要可读
         emit stateChanged(m_state, 0.0, m_lastError);
+        if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
+        return;
+    }
+    if (m_resolution <= 0.0) {
+        m_lastError = QStringLiteral("未加载地图（请先打开 .pgm 与 .yaml 文件后再连接直播）");
+        m_state = QStringLiteral("error");
+        emit stateChanged(m_state, 0.0, m_lastError);
+        if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
         return;
     }
     m_baseUrl = baseUrl;
@@ -425,11 +433,6 @@ void LiveLayer::onTextMessage(const QString& msg)
         const double wy = o.value(QStringLiteral("y")).toDouble();
         const double yaw = o.value(QStringLiteral("yaw")).toDouble();
         const QPointF pix = worldToPixel(wx, wy);
-        qDebug() << "[LiveLayer] frame" << m_frames
-                 << "world=<<" << wx << "," << wy
-                 << " pixel=" << pix
-                 << " res=" << m_resolution
-                 << " pgmH=" << m_pgmHeight;
         // 像素平面角 = -yaw（屏幕 y 向下）
         m_overlay->setVehicle(pix, -yaw, true);
 

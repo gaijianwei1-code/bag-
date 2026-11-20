@@ -95,6 +95,7 @@ public:
 public slots:
     void startLive(const QString& baseUrl, const QString& runId, const QString& token);
     void stopLive();
+    void setRunIdAndConnect(const QString& runId);
 
 signals:
     void stateChanged(const QString& state, double progress, const QString& msg);

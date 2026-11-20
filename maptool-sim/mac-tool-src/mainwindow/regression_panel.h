@@ -12,6 +12,7 @@
 class QComboBox;
 class QTableWidget;
 class QPushButton;
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
@@ -55,6 +56,7 @@ private slots:
     void fetchBranches();
     void fetchVenues();
     void submitRun();
+    void cancelActiveRun();
     void onNetworkFinished(QNetworkReply* reply);
 
 private:
@@ -69,12 +71,15 @@ private:
     QString m_lastRunId;
     QList<BranchInfo> m_branches;
     QMap<QString, bool> m_venueRunnable;   // venue_id → 是否可跑（缺 container 则为 false）
+    QMap<QString, int> m_venueDuration;    // venue_id → 默认时长（秒）
 
     QComboBox* m_comboBranch = nullptr;
     QComboBox* m_comboBag = nullptr;
+    QCheckBox* m_chkRunnableOnly = nullptr;
     QTableWidget* m_tableParams = nullptr;
     QSpinBox* m_spinDuration = nullptr;
     QPushButton* m_btnSubmit = nullptr;
+    QPushButton* m_btnCancel = nullptr;
     QPushButton* m_btnRefresh = nullptr;
     QLabel* m_lblStatus = nullptr;
     QNetworkAccessManager* m_nam = nullptr;

@@ -5,6 +5,8 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QPushButton>
+#include <QCheckBox>
+#include <QMenu>
 #include <QLabel>
 #include <QLineEdit>
 #include <QSpinBox>
@@ -48,12 +50,15 @@ void RegressionPanel::setupUi()
     auto* formSel = new QFormLayout(grpSelect);
     m_comboBranch = new QComboBox;
     m_comboBag = new QComboBox;
+    m_chkRunnableOnly = new QCheckBox(tr("仅显示可运行场地"));
+    m_chkRunnableOnly->setChecked(true);
     m_spinDuration = new QSpinBox;
     m_spinDuration->setRange(10, 600);
-    m_spinDuration->setValue(40);
+    m_spinDuration->setValue(76);
     m_spinDuration->setSuffix(tr(" 秒"));
     formSel->addRow(tr("分支"), m_comboBranch);
     formSel->addRow(tr("Bag"), m_comboBag);
+    formSel->addRow(QString(), m_chkRunnableOnly);
     formSel->addRow(tr("时长"), m_spinDuration);
     mainLayout->addWidget(grpSelect);
 
@@ -69,20 +74,35 @@ void RegressionPanel::setupUi()
 
     auto* hParamBtns = new QHBoxLayout;
     auto* btnAddRow = new QPushButton(tr("+ 添加参数"));
+    auto* btnPreset = new QPushButton(tr("+ 常用参数预设"));
+    auto* presetMenu = new QMenu(btnPreset);
+    presetMenu->addAction(tr("next_goal_tolerance_normal (6 -> 1.0)"), this, [this]() {
+        addParamRow("schedule_goal.yaml", "next_goal_tolerance_normal", "6", "1.0");
+    });
+    presetMenu->addAction(tr("next_goal_tolerance_increase (6 -> 1.0)"), this, [this]() {
+        addParamRow("schedule_goal.yaml", "next_goal_tolerance_increase", "6", "1.0");
+    });
+    presetMenu->addAction(tr("lookahead_distance (1.5 -> 2.0)"), this, [this]() {
+        addParamRow("schedule_goal.yaml", "lookahead_distance", "1.5", "2.0");
+    });
+    btnPreset->setMenu(presetMenu);
     auto* btnDelRow = new QPushButton(tr("- 删除选中"));
     hParamBtns->addWidget(btnAddRow);
+    hParamBtns->addWidget(btnPreset);
     hParamBtns->addWidget(btnDelRow);
     hParamBtns->addStretch();
     vParams->addLayout(hParamBtns);
     mainLayout->addWidget(grpParams);
 
-    // 3. 提交 + 状态
+    // 3. 提交 + 停止 + 状态
     auto* hBottom = new QHBoxLayout;
     m_btnSubmit = new QPushButton(tr("提交复跑"));
     m_btnSubmit->setStyleSheet("QPushButton { background: #2563eb; color: white;"
                                " font-weight: bold; padding: 8px 24px; }");
+    m_btnCancel = new QPushButton(tr("停止当前 run"));
     m_btnRefresh = new QPushButton(tr("刷新"));
     hBottom->addWidget(m_btnRefresh);
+    hBottom->addWidget(m_btnCancel);
     hBottom->addStretch();
     hBottom->addWidget(m_btnSubmit);
     mainLayout->addLayout(hBottom);
@@ -102,11 +122,21 @@ void RegressionPanel::setupUi()
     connect(m_btnRefresh, &QPushButton::clicked, this, [this]() {
         fetchBranches(); fetchVenues();
     });
+    connect(m_chkRunnableOnly, &QCheckBox::toggled, this, [this](bool) {
+        fetchVenues();
+    });
+    connect(m_btnCancel, &QPushButton::clicked, this, &RegressionPanel::cancelActiveRun);
     connect(m_btnSubmit, &QPushButton::clicked, this, &RegressionPanel::submitRun);
     connect(m_comboBranch, &QComboBox::currentTextChanged,
             this, [this](const QString&) { updateSubmitState(); });
-    connect(m_comboBag, &QComboBox::currentTextChanged,
-            this, [this](const QString&) { updateSubmitState(); });
+    connect(m_comboBag, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (idx >= 0) {
+            const int dur = m_comboBag->itemData(idx, Qt::UserRole + 3).toInt();
+            if (dur >= 10 && dur <= 600) m_spinDuration->setValue(dur);
+        }
+        updateSubmitState();
+    });
 }
 
 void RegressionPanel::addParamRow(const QString& file, const QString& key,
@@ -217,6 +247,16 @@ void RegressionPanel::submitRun()
     m_btnSubmit->setEnabled(false);
 }
 
+void RegressionPanel::cancelActiveRun()
+{
+    QNetworkRequest req{QUrl(m_bridgeUrl + "/runs/cancel_active")};
+    req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    m_nam->post(req, QByteArray("{}"));
+    m_lblStatus->setText(tr("正在中止当前 run…"));
+    m_lblStatus->setStyleSheet("color: #b45309;");
+}
+
 void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
 {
     if (reply->error() != QNetworkReply::NoError) {
@@ -274,49 +314,59 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
     else if (url.endsWith("/venues")) {
         m_comboBag->clear();
         m_venueRunnable.clear();
+        m_venueDuration.clear();
         const QJsonArray arr = doc.array();
+        const bool onlyRunnable = m_chkRunnableOnly && m_chkRunnableOnly->isChecked();
         for (const auto& v : arr) {
             const QJsonObject o = v.toObject();
             const QString vid = o["venue_id"].toString();
-            // 跳过不可跑的场地（缺 container.bag 等），否则用户选了它
-            // 提交后 run 立刻 failed，连直播只会"没反应"。
             const bool runnable = o.contains("runnable")
                                   ? o["runnable"].toBool() : true;
             m_venueRunnable[vid] = runnable;
-            // 获取该场地的 bags
+            m_venueDuration[vid] = o.value("duration_s").toInt(60);
+            if (onlyRunnable && !runnable)
+                continue;
             QNetworkRequest req{QUrl(m_bridgeUrl + "/venues/" + vid + "/bags")};
             req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
             m_nam->get(req);
         }
+        updateSubmitState();
     }
     else if (url.contains("/venues/") && url.endsWith("/bags")) {
         const QJsonArray arr = doc.array();
-        // 路径形如 /venues/{vid}/bags —— 必须用 section("/bags", 0, 0) 只取第一段，
-        // 否则 end 默认 -1 会连 "/bags" 一起返回，venue_id 变成 "xxx/bags" → POST /runs 404
+        // 路径形如 /venues/{vid}/bags —— 必须用 section("/bags", 0, 0) 只取第一段
         const QString vid = url.section("/venues/", 1).section("/bags", 0, 0);
         const bool runnable = m_venueRunnable.value(vid, true);
+        const int venueDur = m_venueDuration.value(vid, 60);
         for (const auto& v : arr) {
             const QJsonObject o = v.toObject();
             const QString bag = o["bag"].toString();
-            // 不可跑的场地仍然列出，但标注清楚，避免用户选到才失败
+            const int dur = o.contains("duration_s") ? o["duration_s"].toInt(venueDur) : venueDur;
             const QString label = runnable ? bag
                                            : bag + tr("（场地缺 container，跑不了）");
             m_comboBag->addItem(label, bag);
-            // 存 venue_id 到 UserRole+1
             int idx = m_comboBag->count() - 1;
             m_comboBag->setItemData(idx, vid, Qt::UserRole + 1);
             m_comboBag->setItemData(idx, runnable, Qt::UserRole + 2);
+            m_comboBag->setItemData(idx, dur, Qt::UserRole + 3);
+            if (idx == 0 && dur >= 10 && dur <= 600)
+                m_spinDuration->setValue(dur);
             if (!runnable) {
-                // 灰显，视觉上区分
                 m_comboBag->setItemData(idx, QColor(150, 150, 150), Qt::ForegroundRole);
             }
         }
         updateSubmitState();
     }
+    else if (url.endsWith("/runs/cancel_active")) {
+        m_lblStatus->setText(tr("已停止当前 run，可重新提交"));
+        m_lblStatus->setStyleSheet("color: green;");
+        m_btnSubmit->setEnabled(true);
+        updateSubmitState();
+    }
     else if (url.endsWith("/runs")) {
         const QJsonObject o = doc.object();
         m_lastRunId = o["run_id"].toString();
-        m_lblStatus->setText(tr("已提交 run_id=%1，切换到直播跟车连接").arg(m_lastRunId));
+        m_lblStatus->setText(tr("已提交 run_id=%1，正在自动连接直播…").arg(m_lastRunId));
         m_lblStatus->setStyleSheet("color: green;");
         emit runSubmitted(m_lastRunId);
         m_btnSubmit->setEnabled(true);
