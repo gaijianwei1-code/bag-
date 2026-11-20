@@ -1,3 +1,30 @@
+# 构建产物
 build/
+build-repro/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+
+# Python
 .venv/
-build/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 运行时产物（run 结果通常很大，按需归档）
+runs/
+
+# 临时探针
+sim-bridge/qt_probe/
+/tmp/blz_*
