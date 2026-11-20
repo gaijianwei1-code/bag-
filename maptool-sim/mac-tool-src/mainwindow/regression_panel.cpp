@@ -121,7 +121,9 @@ void RegressionPanel::addParamRow(const QString& file, const QString& key,
 
 QString RegressionPanel::selectedBranch() const
 {
-    return m_comboBranch->currentText();
+    // 显示文本可能带 " ★" 标记，发给 bridge 的必须是纯分支名
+    const QString data = m_comboBranch->currentData().toString();
+    return data.isEmpty() ? m_comboBranch->currentText() : data;
 }
 
 QString RegressionPanel::selectedBag() const
@@ -210,13 +212,36 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
 {
     if (reply->error() != QNetworkReply::NoError) {
         const QString err = reply->errorString();
+        // Qt 对 4xx/5xx 统一报 "server replied: Not Found/Conflict"，
+        // 真正的信息在响应体 {"detail": ...} 里 —— 优先展示它，否则排查会被误导。
+        const QByteArray body = reply->readAll();
+        QString detail;
+        const QJsonDocument d = QJsonDocument::fromJson(body);
+        if (d.isObject()) {
+            const QJsonValue dv = d.object().value("detail");
+            if (dv.isString()) detail = dv.toString();
+            else if (dv.isArray()) {
+                // 422 校验错误是数组，把 msg 拼起来
+                QStringList parts;
+                for (const auto& e : dv.toArray())
+                    parts << e.toObject().value("msg").toString();
+                detail = parts.join("; ");
+            }
+        }
+        const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
         if (err.contains("Connection refused") || err.contains("HostNotFound")) {
             showError(tr("无法连接 bridge（%1）。\n"
                          "请先运行：bash sim-bridge/start_bridge.sh").arg(m_bridgeUrl));
+        } else if (!detail.isEmpty()) {
+            showError(tr("提交失败（HTTP %1）：%2").arg(http).arg(detail));
+        } else if (http == 409) {
+            showError(tr("已有 run 在跑（首版单并发）。请等当前 run 结束或重启 bridge 后再试。"));
         } else {
-            showError(err);
+            showError(tr("%1（HTTP %2）").arg(err).arg(http));
         }
         m_btnSubmit->setEnabled(true);
+        reply->deleteLater();
         return;
     }
 
@@ -251,7 +276,9 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
     }
     else if (url.contains("/venues/") && url.endsWith("/bags")) {
         const QJsonArray arr = doc.array();
-        const QString vid = url.section("/venues/", 1).section("/bags", 0);
+        // 路径形如 /venues/{vid}/bags —— 必须用 section("/bags", 0, 0) 只取第一段，
+        // 否则 end 默认 -1 会连 "/bags" 一起返回，venue_id 变成 "xxx/bags" → POST /runs 404
+        const QString vid = url.section("/venues/", 1).section("/bags", 0, 0);
         for (const auto& v : arr) {
             const QJsonObject o = v.toObject();
             const QString bag = o["bag"].toString();
