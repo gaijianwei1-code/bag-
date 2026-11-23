@@ -11,6 +11,7 @@
 #include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QPushButton>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -170,9 +171,21 @@ void VenueWizard::setupUi()
     hTraj->addWidget(btnTraj);
     fBag->addRow(tr("默认轨迹 .json *"), hTraj);
 
+    auto* hBag = new QHBoxLayout;
+    m_editBagLocal = new QLineEdit;
+    m_editBagLocal->setPlaceholderText(tr("点右侧「浏览…」选择本机 .bag 文件"));
+    auto* btnBag = new QPushButton(tr("浏览…"));
+    hBag->addWidget(m_editBagLocal, 1);
+    hBag->addWidget(btnBag);
+    fBag->addRow(tr("本机 Bag 文件 *"), hBag);
+
     m_editBagRel = new QLineEdit;
-    m_editBagRel->setPlaceholderText(tr("如 bags/site-east-01.bag"));
-    fBag->addRow(tr("Bag 标识路径 *"), m_editBagRel);
+    m_editBagRel->setPlaceholderText(tr("自动生成，如 bags/site-east-01.bag"));
+    fBag->addRow(tr("Bag 标识名 *"), m_editBagRel);
+
+    m_chkAutoSync = new QCheckBox(tr("保存时自动同步地图 / 点云 / 轨迹 / Bag 进 Docker 容器（保存后立即可复跑）"));
+    m_chkAutoSync->setChecked(true);
+    fBag->addRow(QString(), m_chkAutoSync);
 
     auto* hDur = new QHBoxLayout;
     m_spinDuration = new QSpinBox;
@@ -238,6 +251,23 @@ void VenueWizard::setupUi()
     connect(btnPgm, &QPushButton::clicked, this, &VenueWizard::browsePgm);
     connect(btnPcd, &QPushButton::clicked, this, &VenueWizard::browsePcd);
     connect(btnTraj, &QPushButton::clicked, this, &VenueWizard::browseTraj);
+    connect(btnBag, &QPushButton::clicked, this, &VenueWizard::browseBag);
+    connect(m_chkAutoSync, &QCheckBox::toggled, this, [this](bool on) {
+        m_comboContainerMapDir->setEnabled(!on);
+        m_comboContainerBag->setEnabled(!on);
+        m_comboContainerTraj->setEnabled(!on);
+        m_comboContainerWorld->setEnabled(!on);
+        m_btnScanContainer->setEnabled(!on);
+        m_lblContainerHint->setText(on ? tr("已启用自动同步：保存时自动导入容器并生成 scene.yaml")
+                                       : tr("手动模式：可扫描或填写容器内已有路径"));
+    });
+    // 初始同步容器区启用状态
+    m_comboContainerMapDir->setEnabled(false);
+    m_comboContainerBag->setEnabled(false);
+    m_comboContainerTraj->setEnabled(false);
+    m_comboContainerWorld->setEnabled(false);
+    m_btnScanContainer->setEnabled(false);
+    m_lblContainerHint->setText(tr("已启用自动同步：保存时自动导入容器并生成 scene.yaml"));
     connect(m_btnScanContainer, &QPushButton::clicked, this, &VenueWizard::scanContainerAssets);
     connect(m_editId, &QLineEdit::textChanged, this, [this](const QString& txt) {
         if (m_editBagRel->text().trimmed().isEmpty() && !txt.trimmed().isEmpty()) {
@@ -414,6 +444,21 @@ void VenueWizard::browseTraj()
     checkTrajFile();
 }
 
+void VenueWizard::browseBag()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("选择 ROS Bag (.bag)"), m_lastDir, tr("ROS Bag (*.bag);;All Files (*)"));
+    if (path.isEmpty()) return;
+    m_lastDir = QFileInfo(path).absolutePath();
+    m_editBagLocal->setText(path);
+    const QFileInfo fi(path);
+    m_editBagRel->setText(QStringLiteral("bags/%1").arg(fi.fileName()));
+    const double mb = fi.size() / (1024.0 * 1024.0);
+    m_lblTrajCheck->setText(
+        tr("✓ 已选择 Bag：%1（%2 MB）").arg(fi.fileName()).arg(mb, 0, 'f', 1));
+    m_lblTrajCheck->setStyleSheet("color: #15803d; font-size: 12px;");
+}
+
 void VenueWizard::checkTrajFile()
 {
     const QString p = m_editTraj->text().trimmed();
@@ -483,8 +528,15 @@ bool VenueWizard::validateStep3(QString& errOut) const
         errOut = tr("请选择默认轨迹 .json 文件");
         return false;
     }
+    if (m_chkAutoSync && m_chkAutoSync->isChecked()) {
+        const QString lp = m_editBagLocal->text().trimmed();
+        if (lp.isEmpty() || !QFile::exists(lp)) {
+            errOut = tr("已勾选自动同步进容器，请点击「浏览…」选择有效的本机 .bag 文件");
+            return false;
+        }
+    }
     if (m_editBagRel->text().trimmed().isEmpty()) {
-        errOut = tr("请填写 Bag 标识路径（例如 bags/%1.bag）").arg(m_editId->text().trimmed());
+        errOut = tr("请填写或选择 Bag 标识路径（例如 bags/%1.bag）").arg(m_editId->text().trimmed());
         return false;
     }
     return true;
@@ -564,22 +616,30 @@ QJsonObject VenueWizard::buildVenueJson() const
     bagItem["bag"] = m_editBagRel->text().trimmed();
     bagItem["traj"] = m_editTraj->text().trimmed();
     bagItem["duration_s"] = m_spinDuration->value();
+    if (!m_editBagLocal->text().trimmed().isEmpty())
+        bagItem["local_bag"] = m_editBagLocal->text().trimmed();
     bagItem["notes"] = tr("由 MapTool 场地档案向导录入");
     QJsonArray bags;
     bags.append(bagItem);
     v["bags"] = bags;
 
-    const QString cMap = m_comboContainerMapDir->currentText().trimmed();
-    const QString cBag = m_comboContainerBag->currentText().trimmed();
-    const QString cTraj = m_comboContainerTraj->currentText().trimmed();
-    const QString cWorld = m_comboContainerWorld->currentText().trimmed();
-    if (!cMap.isEmpty() || !cBag.isEmpty() || !cTraj.isEmpty() || !cWorld.isEmpty()) {
-        QJsonObject cont;
-        if (!cMap.isEmpty()) cont["map_dir"] = cMap;
-        if (!cBag.isEmpty()) cont["bag"] = cBag;
-        if (!cTraj.isEmpty()) cont["trajectory"] = cTraj;
-        if (!cWorld.isEmpty()) cont["world"] = cWorld;
-        v["container"] = cont;
+    if (!m_editBagLocal->text().trimmed().isEmpty())
+        v["local_bag"] = m_editBagLocal->text().trimmed();
+    if (m_chkAutoSync && m_chkAutoSync->isChecked()) {
+        v["sync_to_container"] = true;
+    } else {
+        const QString cMap = m_comboContainerMapDir->currentText().trimmed();
+        const QString cBag = m_comboContainerBag->currentText().trimmed();
+        const QString cTraj = m_comboContainerTraj->currentText().trimmed();
+        const QString cWorld = m_comboContainerWorld->currentText().trimmed();
+        if (!cMap.isEmpty() || !cBag.isEmpty() || !cTraj.isEmpty() || !cWorld.isEmpty()) {
+            QJsonObject cont;
+            if (!cMap.isEmpty()) cont["map_dir"] = cMap;
+            if (!cBag.isEmpty()) cont["bag"] = cBag;
+            if (!cTraj.isEmpty()) cont["trajectory"] = cTraj;
+            if (!cWorld.isEmpty()) cont["world"] = cWorld;
+            v["container"] = cont;
+        }
     }
     return v;
 }

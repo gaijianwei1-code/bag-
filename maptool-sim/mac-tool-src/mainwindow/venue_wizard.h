@@ -14,6 +14,7 @@ class QLineEdit;
 class QDoubleSpinBox;
 class QSpinBox;
 class QComboBox;
+class QCheckBox;
 class QPushButton;
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -35,6 +36,7 @@ private slots:
     void browsePgm();
     void browsePcd();
     void browseTraj();
+    void browseBag();
     void scanContainerAssets();
     void onPrevStep();
     void onNextOrSave();
@@ -85,7 +87,9 @@ private:
 
     // 第 3 步：Bag / 轨迹 + 容器路径
     QLineEdit* m_editTraj = nullptr;
+    QLineEdit* m_editBagLocal = nullptr;
     QLineEdit* m_editBagRel = nullptr;
+    QCheckBox* m_chkAutoSync = nullptr;
     QSpinBox* m_spinDuration = nullptr;
     QLineEdit* m_editParamSet = nullptr;
     QLabel* m_lblTrajCheck = nullptr;

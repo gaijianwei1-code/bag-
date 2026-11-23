@@ -69,6 +69,98 @@ def list_venues(x_bridge_token: Optional[str] = Header(None)):
     return out
 
 
+def _sync_venue_to_container(venue: dict) -> dict:
+    """T1.2: 将向导中选择的本机 pgm/yaml/pcd/traj/bag 自动同步进容器并生成 scene.yaml，
+    让新建场地保存后立即可在回归面板运行，不再提示「缺 container」。
+    """
+    import shlex
+    import subprocess
+
+    vid = venue.get("venue_id", "")
+    container = os.environ.get("SIM_CONTAINER", "roboneo-sim")
+    ws = os.environ.get("SIM_WS_DIR", "/root/catkin_ws")
+    scene_dir = f"{ws}/scenes/{vid}"
+    bag_dir = f"/root/bags/{vid}"
+
+    pgm = str(venue.get("map_pgm") or "")
+    pcd = str(venue.get("map_pcd") or "")
+    traj = str(venue.get("default_traj") or "")
+    local_bag = str(venue.get("local_bag") or "")
+    if not local_bag:
+        bags = venue.get("bags") or []
+        if bags and isinstance(bags[0], dict):
+            cand = str(bags[0].get("local_bag") or bags[0].get("bag") or "")
+            if os.path.isfile(cand):
+                local_bag = cand
+
+    missing = []
+    for label, p in (("地图 .pgm", pgm), ("点云 .pcd", pcd), ("轨迹 .json", traj), ("本机 .bag", local_bag)):
+        if not p or not os.path.isfile(p):
+            missing.append(f"{label}（{p or '未选择'}）")
+    if missing:
+        raise HTTPException(422, "无法同步进容器，以下本机文件不存在：" + "、".join(missing))
+
+    pgm_yaml = os.path.splitext(pgm)[0] + ".yaml"
+    subprocess.run(
+        ["docker", "exec", container, "bash", "-lc", f"mkdir -p {shlex.quote(scene_dir)} {shlex.quote(bag_dir)}"],
+        check=True, capture_output=True, text=True, timeout=15)
+
+    def _cp(src_path, dst_path):
+        subprocess.run(["docker", "cp", src_path, f"{container}:{dst_path}"],
+                       check=True, capture_output=True, text=True, timeout=180)
+
+    c_pgm = f"{scene_dir}/{os.path.basename(pgm)}"
+    c_pcd = f"{scene_dir}/{os.path.basename(pcd)}"
+    c_traj = f"{scene_dir}/{os.path.basename(traj)}"
+    c_bag = f"{bag_dir}/{os.path.basename(local_bag)}"
+    _cp(pgm, c_pgm)
+    if os.path.isfile(pgm_yaml):
+        _cp(pgm_yaml, f"{scene_dir}/{os.path.basename(pgm_yaml)}")
+    _cp(pcd, c_pcd)
+    _cp(traj, c_traj)
+    _cp(local_bag, c_bag)
+
+    # 在容器内自动生成标准 B 线 scene.yaml（从轨迹首点提取 initial_x/y/yaw）
+    c_scene_yaml = f"{ws}/sim/scenes/venue_{vid}.yaml"
+    map_base = os.path.splitext(os.path.basename(pgm))[0]
+    dur = int(venue.get("duration_s") or ((venue.get("bags") or [{}])[0].get("duration_s")) or 76)
+    gen_py = (
+        "import json, math, os, yaml\n"
+        f"c_traj = {c_traj!r}; c_pcd = {c_pcd!r}; scene_dir = {scene_dir!r}\n"
+        f"vid = {vid!r}; map_base = {map_base!r}; dur = {dur!r}; out_yaml = {c_scene_yaml!r}\n"
+        f"name = {str(venue.get('name') or vid)!r}\n"
+        "with open(c_traj, 'r', encoding='utf-8') as f: tj = json.load(f)\n"
+        "pts = tj.get('points') if isinstance(tj, dict) else tj\n"
+        "ix, iy, iyaw = 0.0, 0.0, 0.0\n"
+        "if pts and len(pts) >= 2:\n"
+        "    p0, p1 = pts[0], pts[1]\n"
+        "    ix, iy = float(p0.get('x', 0.0)), float(p0.get('y', 0.0))\n"
+        "    iyaw = float(p0['yaw']) if p0.get('yaw') is not None else math.atan2(float(p1.get('y',0))-iy, float(p1.get('x',0))-ix)\n"
+        "sc = {\n"
+        "    'scene_id': f'venue_{vid}', 'line': 'B', 'name': name,\n"
+        "    'world': c_pcd, 'world_source': 'MapTool 场地向导导入',\n"
+        "    'map_dir': scene_dir, 'map_name': map_base, 'trajectory': c_traj,\n"
+        "    'duration_s': dur, 'warmup_s': 0, 'seed': 0,\n"
+        "    'initial_x': ix, 'initial_y': iy, 'initial_yaw': iyaw,\n"
+        "    'metrics': ['path_completion', 'terminal_reached', 'command_continuity'],\n"
+        "}\n"
+        "os.makedirs(os.path.dirname(out_yaml), exist_ok=True)\n"
+        "with open(out_yaml, 'w', encoding='utf-8') as f:\n"
+        "    yaml.safe_dump(sc, f, allow_unicode=True, sort_keys=False)\n"
+    )
+    subprocess.run(["docker", "exec", container, "python3", "-c", gen_py],
+                   check=True, capture_output=True, text=True, timeout=20)
+
+    cont = dict(venue.get("container") or {})
+    cont["map_dir"] = scene_dir
+    cont["bag"] = c_bag
+    cont["trajectory"] = c_traj
+    cont["world"] = c_pcd
+    cont["scene_yaml"] = c_scene_yaml
+    venue["container"] = cont
+    return cont
+
+
 @app.post("/venues", status_code=201)
 def create_venue(venue: dict, x_bridge_token: Optional[str] = Header(None)):
     _auth(x_bridge_token)
@@ -76,9 +168,12 @@ def create_venue(venue: dict, x_bridge_token: Optional[str] = Header(None)):
     path = os.path.join(VENUES_DIR, f"{vid}.yaml")
     if os.path.exists(path):
         raise HTTPException(409, f"场地 ID 已存在：{vid}")
+    do_sync = bool(venue.pop("sync_to_container", False))
     _check(venue)
+    if do_sync:
+        _sync_venue_to_container(venue)
     V.save_venue(path, venue)
-    return {"venue_id": vid}
+    return {"venue_id": vid, "runnable": bool((venue.get("container") or {}).get("bag"))}
 
 
 @app.put("/venues/{vid}")
@@ -88,9 +183,12 @@ def update_venue(vid: str, venue: dict, x_bridge_token: Optional[str] = Header(N
     if not os.path.exists(path):
         raise HTTPException(404, f"场地不存在：{vid}")
     venue["venue_id"] = vid  # 路径优先于 body
+    do_sync = bool(venue.pop("sync_to_container", False))
     _check(venue)
+    if do_sync:
+        _sync_venue_to_container(venue)
     V.save_venue(path, venue)
-    return {"venue_id": vid}
+    return {"venue_id": vid, "runnable": bool((venue.get("container") or {}).get("bag"))}
 
 
 @app.get("/venues/{vid}/bags")
