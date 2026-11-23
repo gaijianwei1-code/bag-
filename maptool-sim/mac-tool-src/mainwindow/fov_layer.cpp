@@ -320,7 +320,17 @@ void FovLayer::recalcAll()
             if (!pt) continue;
             ++totalPts;
             const QPointF pix = pt->getPoint();
-            const qreal yaw = pt->yaw();
+            // 实时按相邻轨迹点重算切线朝向（拖动轨迹点后红框立即随弯旋转）
+            qreal yaw = pt->yaw();
+            if (n >= 2) {
+                BPointItem* pA = (i + 1 < n) ? pt : path->getElement(i - 1);
+                BPointItem* pB = (i + 1 < n) ? path->getElement(i + 1) : pt;
+                if (pA && pB) {
+                    const QPointF dp = pB->getPoint() - pA->getPoint();
+                    if (std::hypot(dp.x(), dp.y()) > 1e-3)
+                        yaw = std::atan2(-dp.y(), dp.x());  // 像素 y 向下，世界 dy = -dp.y
+                }
+            }
             const double screenYaw = -yaw;
             const double c = std::cos(screenYaw), s = std::sin(screenYaw);
             const double invRes = (m_resolution > 0.0) ? (1.0 / m_resolution) : 1.0;
@@ -364,6 +374,7 @@ void FovLayer::recalcAll()
                     rp.x_max = kHalfL + m_front_dist;
                     rp.half_width = kHalfW;
                     rp.max_hits = 48;
+                    rp.ref_x = kHalfL;   // 以车头前沿为 0 基准：车身内碰撞=0.0m，车头前方=前视净空
                     res = blz::cast_rect(*m_grid, wx, wy, yaw, rp);
                 } else {
                     blz::FovParams fp;
@@ -382,8 +393,11 @@ void FovLayer::recalcAll()
                         e.sectorColor = QColor(239, 68, 68, 52);    // 危险红框
                         e.borderColor = QColor(220, 38, 38, 210);
                         // 仅每间隔若干点或最近点标距离，避免文字重叠
-                        if (res.first_hit_dist >= 0.0 && (i % 3 == 0 || hits <= 5))
-                            e.label = QStringLiteral("%1m").arg(res.first_hit_dist, 0, 'f', 2);
+                        if (res.first_hit_dist >= 0.0 && (i % 3 == 0 || hits <= 5)) {
+                            e.label = (res.first_hit_dist <= 0.01)
+                                ? QObject::tr("车身擦碰!")
+                                : QObject::tr("前视 %1m").arg(res.first_hit_dist, 0, 'f', 2);
+                        }
                     } else {
                         e.sectorColor = QColor(30, 144, 255, 46);
                         e.borderColor = QColor(0, 0, 0, 0);
@@ -413,9 +427,11 @@ void FovLayer::recalcAll()
             m_lblSummary->setText(QObject::tr("尚未加载 .pcd 点云（仅显示检测框轮廓）"));
             m_lblSummary->setStyleSheet("color: #b45309; font-size: 12px;");
         } else if (hits > 0) {
-            m_lblSummary->setText(QObject::tr("危险点：%1 / %2（最近命中 %3m）")
-                                      .arg(hits).arg(totalPts)
-                                      .arg(minHitDist < 1e17 ? minHitDist : 0.0, 0, 'f', 2));
+            const QString distTxt = (minHitDist <= 0.01)
+                ? QObject::tr("存在车身擦碰!")
+                : QObject::tr("最近前视 %1m").arg(minHitDist < 1e17 ? minHitDist : 0.0, 0, 'f', 2);
+            m_lblSummary->setText(QObject::tr("危险点：%1 / %2（%3）")
+                                      .arg(hits).arg(totalPts).arg(distTxt));
             m_lblSummary->setStyleSheet("color: #dc2626; font-weight: bold; font-size: 12px;");
         } else {
             m_lblSummary->setText(QObject::tr("全线 %1 个轨迹点净空安全（0 命中）").arg(totalPts));

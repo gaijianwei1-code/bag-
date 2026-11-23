@@ -53,6 +53,8 @@ void RegressionPanel::setupUi()
     m_comboBag = new QComboBox;
     m_chkRunnableOnly = new QCheckBox(tr("仅显示可运行场地"));
     m_chkRunnableOnly->setChecked(true);
+    m_chkUseCanvasTraj = new QCheckBox(tr("使用画布当前修改的轨迹复跑（未加载轨迹时自动用场地原轨迹）"));
+    m_chkUseCanvasTraj->setChecked(true);
     m_spinDuration = new QSpinBox;
     m_spinDuration->setRange(10, 600);
     m_spinDuration->setValue(76);
@@ -60,6 +62,7 @@ void RegressionPanel::setupUi()
     formSel->addRow(tr("分支"), m_comboBranch);
     formSel->addRow(tr("Bag"), m_comboBag);
     formSel->addRow(QString(), m_chkRunnableOnly);
+    formSel->addRow(QString(), m_chkUseCanvasTraj);
     formSel->addRow(tr("时长"), m_spinDuration);
     mainLayout->addWidget(grpSelect);
 
@@ -264,6 +267,11 @@ void RegressionPanel::setSegmentPicker(std::function<bool(int&, int&, int&)> pic
     m_segmentPicker = std::move(picker);
 }
 
+void RegressionPanel::setTrajectoryExporter(std::function<QJsonObject()> exporter)
+{
+    m_trajExporter = std::move(exporter);
+}
+
 void RegressionPanel::syncSegmentFromMap(bool autoEnable)
 {
     if (!m_segmentPicker) {
@@ -376,7 +384,11 @@ void RegressionPanel::submitRun()
     body["venue_id"] = m_comboBag->currentData(Qt::UserRole + 1).toString();
     body["bag"] = m_comboBag->currentData().toString();
     body["branch"] = selectedBranch();
-    body["traj_json"] = QJsonObject();
+    QJsonObject trajObj;
+    if (m_chkUseCanvasTraj && m_chkUseCanvasTraj->isChecked() && m_trajExporter) {
+        trajObj = m_trajExporter();
+    }
+    body["traj_json"] = trajObj;
     body["duration_s"] = m_spinDuration->value();
 
     // T4.2 L2 分段重跑参数

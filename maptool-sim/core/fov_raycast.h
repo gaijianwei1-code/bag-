@@ -28,6 +28,7 @@ struct RectParams {
     double x_max = 2.925;      // 纵向终点（米，如车头前沿 0.925 + 前视距离 2.0）
     double half_width = 0.75;  // 半宽（米，1.50m 车身半宽 = 0.75）
     int max_hits = 64;         // 最多返回命中点数（按距离最近优先）
+    double ref_x = -1e9;       // 距离参考面（<= -1e8 时默认取 x_min；传 +0.925 表示以车头前沿为 0，车身内碰撞返回 0.0）
 };
 
 // 位姿 (x, y, yaw)：扫描旋转矩形 [x_min, x_max] × [-half_width, +half_width] 内的占据网格点。

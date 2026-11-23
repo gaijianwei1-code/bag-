@@ -89,7 +89,7 @@ MainWindow::MainWindow(QWidget *parent)
         connect(fovLayer, &FovLayer::zmaxChanged, this, [this](double v) {
             if (fovCloud) {
                 fovGrid = std::make_unique<blz::GridProjection>(
-                    blz::project_to_grid(*fovCloud, 0.4, 0.05, v));
+                    blz::project_to_grid(*fovCloud, 0.10, 0.05, v));
                 fovLayer->setGrid(fovGrid.get());
                 if (liveLayer) liveLayer->setGrid(fovGrid.get());
             }
@@ -155,6 +155,60 @@ MainWindow::MainWindow(QWidget *parent)
                     fromIdx = minIdx;
                     toIdx = maxIdx;
                     return true;
+                });
+                // 画布修改后的轨迹实时导出，直接送入仿真复跑
+                regressionPanel->setTrajectoryExporter([this]() -> QJsonObject {
+                    QJsonObject out;
+                    if (!pgmScene || !pgmPixmapItem || resolution <= 0.0) return out;
+                    BPathItem* activePath = nullptr;
+                    for (BPathItem* p : m_path_list) {
+                        if (p && p->scene() == pgmScene && p->pointsNumber() >= 2) {
+                            activePath = p;
+                            break;
+                        }
+                    }
+                    if (!activePath && m_path && m_path->scene() == pgmScene && m_path->pointsNumber() >= 2)
+                        activePath = m_path;
+                    if (!activePath) return out;
+
+                    const int pgmH = pgmPixmapItem->pixmap().height();
+                    const int n = activePath->pointsNumber();
+                    QJsonArray ptsArr;
+                    for (int i = 0; i < n; ++i) {
+                        BPointItem* pt = activePath->getElement(i);
+                        if (!pt) continue;
+                        const QPointF pix = pt->getPoint();
+                        const double wx = pix.x() * resolution + origin_x;
+                        const double wy = (pgmH - 1 - pix.y()) * resolution + origin_y;
+                        double yaw = pt->yaw();
+                        BPointItem* pA = (i + 1 < n) ? pt : activePath->getElement(i - 1);
+                        BPointItem* pB = (i + 1 < n) ? activePath->getElement(i + 1) : pt;
+                        if (pA && pB) {
+                            const QPointF dp = pB->getPoint() - pA->getPoint();
+                            if (std::hypot(dp.x(), dp.y()) > 1e-3)
+                                yaw = std::atan2(-dp.y(), dp.x());
+                        }
+                        QJsonObject po;
+                        po["x"] = wx;
+                        po["y"] = wy;
+                        po["yaw"] = yaw;
+                        po["pixel_x"] = pix.x();
+                        po["pixel_y"] = pix.y();
+                        po["bypass"] = 1;
+                        po["road_id"] = 1;
+                        po["back"] = 0;
+                        po["clean_flag"] = 0;
+                        po["force_pass"] = 0;
+                        po["ignore_obstacles"] = 0;
+                        po["localization_mode"] = 0;
+                        po["reverse_traj"] = 0;
+                        po["turnAround"] = 0;
+                        ptsArr.append(po);
+                    }
+                    if (ptsArr.size() < 2) return out;
+                    out["points"] = ptsArr;
+                    out["post_process"] = 0;
+                    return out;
                 });
                 // 提交成功后自动展开直播面板并自动连接直播
                 connect(regressionPanel, &RegressionPanel::runSubmitted,
@@ -1372,7 +1426,7 @@ void MainWindow::on_doOpenPcd_triggered()
 
         fovCloud = std::make_unique<std::vector<blz::Vec3>>(std::move(pts));
         fovGrid = std::make_unique<blz::GridProjection>(
-            blz::project_to_grid(*fovCloud, 0.4, 0.05, fovLayer->zmax()));
+            blz::project_to_grid(*fovCloud, 0.10, 0.05, fovLayer->zmax()));
 
         fovLayer->setGrid(fovGrid.get());
         if (liveLayer) liveLayer->setGrid(fovGrid.get());

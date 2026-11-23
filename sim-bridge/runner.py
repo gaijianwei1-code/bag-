@@ -165,12 +165,32 @@ def compute_segment_slice(points, segment, total_duration_s=76.0):
 
 
 def _prepare_segment_scene(base_scene_path, segment, run_id,
-                           total_duration_s=76.0, req_duration_s=None):
-    """在容器内裁剪子轨迹并生成临时分段 scene YAML，返回 segment_meta。"""
+                           total_duration_s=76.0, req_duration_s=None,
+                           custom_traj_json=None):
+    """在容器内支持自定义画布轨迹与/或 L2 分段裁剪，生成临时 scene YAML 并返回元信息。"""
     import shlex
     seg = normalize_segment(segment)
-    if not seg:
+    has_custom = (isinstance(custom_traj_json, dict)
+                  and isinstance(custom_traj_json.get("points"), list)
+                  and len(custom_traj_json["points"]) >= 2)
+    if not seg and not has_custom:
         return None
+    custom_path = None
+    if has_custom:
+        # 先将画布修改后的轨迹通过 docker cp 写入容器临时路径（避免命令行超长）
+        tmp_local = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        try:
+            json.dump(custom_traj_json, tmp_local, ensure_ascii=False)
+            tmp_local.close()
+            custom_path = f"/tmp/blz_custom_traj_{run_id}.json"
+            subprocess.run(["docker", "cp", tmp_local.name, f"{CONTAINER}:{custom_path}"],
+                           check=True, capture_output=True)
+        finally:
+            try:
+                os.unlink(tmp_local.name)
+            except OSError:
+                pass
+
     seg_json = json.dumps(seg, ensure_ascii=False)
     seg_traj_path = f"/tmp/blz_seg_traj_{run_id}.json"
     seg_scene_path = f"/tmp/blz_seg_scene_{run_id}.yaml"
@@ -178,6 +198,7 @@ def _prepare_segment_scene(base_scene_path, segment, run_id,
         "import json, math, os, sys, yaml\n"
         f"base_scene = {base_scene_path!r}\n"
         f"seg = json.loads({seg_json!r})\n"
+        f"custom_path = {custom_path!r}\n"
         f"out_traj = {seg_traj_path!r}\n"
         f"out_scene = {seg_scene_path!r}\n"
         f"total_dur = float({float(total_duration_s or 76.0)!r})\n"
@@ -185,26 +206,29 @@ def _prepare_segment_scene(base_scene_path, segment, run_id,
         f"run_id = {run_id!r}\n"
         "with open(base_scene, 'r', encoding='utf-8') as f:\n"
         "    scene = yaml.safe_load(f) or {}\n"
-        "traj_path = scene.get('trajectory') or '/root/catkin_ws/scenes/scenario_1793346971223/1793347176294.json'\n"
+        "traj_path = custom_path or scene.get('trajectory') or '/root/catkin_ws/scenes/scenario_1793346971223/1793347176294.json'\n"
         "with open(traj_path, 'r', encoding='utf-8') as f:\n"
         "    traj = json.load(f)\n"
         "pts = traj.get('points') if isinstance(traj, dict) else traj\n"
         "n = len(pts or [])\n"
         "if n < 2:\n"
         "    print(json.dumps({'error': 'SEGMENT_INVALID', 'detail': f'轨迹点数不足: {n}'})); sys.exit(2)\n"
-        "if seg['mode'] == 'index':\n"
-        "    fi = min(n - 1, max(0, int(seg['from_idx'])))\n"
-        "    ti = min(n - 1, max(fi, int(seg['to_idx'])))\n"
-        "    pad = max(0, int(seg.get('pad_points', 4)))\n"
+        "if seg:\n"
+        "    if seg['mode'] == 'index':\n"
+        "        fi = min(n - 1, max(0, int(seg['from_idx'])))\n"
+        "        ti = min(n - 1, max(fi, int(seg['to_idx'])))\n"
+        "        pad = max(0, int(seg.get('pad_points', 4)))\n"
+        "    else:\n"
+        "        dur = max(1.0, total_dur)\n"
+        "        fi = min(n - 1, max(0, int(round((seg['from_t'] / dur) * (n - 1)))))\n"
+        "        ti = min(n - 1, max(fi, int(round((seg['to_t'] / dur) * (n - 1)))))\n"
+        "        pad = max(1, int(round((seg.get('pad_s', 3.0) / dur) * (n - 1))))\n"
+        "    ss = max(0, fi - pad)\n"
+        "    se = min(n - 1, ti)\n"
+        "    if se <= ss: se = min(n - 1, ss + 1)\n"
+        "    if se <= ss and ss > 0: ss = se - 1\n"
         "else:\n"
-        "    dur = max(1.0, total_dur)\n"
-        "    fi = min(n - 1, max(0, int(round((seg['from_t'] / dur) * (n - 1)))))\n"
-        "    ti = min(n - 1, max(fi, int(round((seg['to_t'] / dur) * (n - 1)))))\n"
-        "    pad = max(1, int(round((seg.get('pad_s', 3.0) / dur) * (n - 1))))\n"
-        "ss = max(0, fi - pad)\n"
-        "se = min(n - 1, ti)\n"
-        "if se <= ss: se = min(n - 1, ss + 1)\n"
-        "if se <= ss and ss > 0: ss = se - 1\n"
+        "    fi, ti, ss, se = 0, n - 1, 0, n - 1\n"
         "sub = pts[ss:se + 1]\n"
         "p0, p1 = sub[0], sub[1]\n"
         "ix = float(p0.get('x', 0.0)); iy = float(p0.get('y', 0.0))\n"
@@ -225,6 +249,7 @@ def _prepare_segment_scene(base_scene_path, segment, run_id,
         "with open(out_scene, 'w', encoding='utf-8') as f:\n"
         "    yaml.safe_dump(scene, f, allow_unicode=True, sort_keys=False)\n"
         "print(json.dumps({'ok': True, 'scene_path': out_scene, 'traj_path': out_traj,\n"
+        "  'custom_trajectory': bool(custom_path), 'segmented': bool(seg),\n"
         "  'from_idx': fi, 'to_idx': ti, 'safe_start_idx': ss, 'safe_end_idx': se,\n"
         "  'total_points': n, 'point_count': len(sub), 'arc_len_m': round(arc, 2),\n"
         "  'init_pose': {'x': round(ix, 4), 'y': round(iy, 4), 'yaw': round(iyaw, 5)},\n"
@@ -469,8 +494,12 @@ def submit(venue, req, run_id, on_status=None):
         status("queued", 0.25, "构建 bag_replay 参数")
         args, baseline_ps, candidate_ps = build_replay_args(venue, req, run_id)
         segment_info = None
-        if req.get("segment"):
-            status("queued", 0.27, "裁剪 L2 分段轨迹并计算安全起步点")
+        traj_json = req.get("traj_json") or {}
+        has_custom_traj = (isinstance(traj_json, dict)
+                           and isinstance(traj_json.get("points"), list)
+                           and len(traj_json["points"]) >= 2)
+        if req.get("segment") or has_custom_traj:
+            status("queued", 0.27, "写入画布轨迹 / 裁剪 L2 分段并计算安全起步点")
             scene_idx = args.index("--scene") + 1
             dur_idx = args.index("--duration") + 1
             base_scene = args[scene_idx]
@@ -478,6 +507,7 @@ def submit(venue, req, run_id, on_status=None):
                 base_scene, req.get("segment"), run_id,
                 total_duration_s=venue.get("duration_s") or 76,
                 req_duration_s=req.get("duration_s"),
+                custom_traj_json=traj_json if has_custom_traj else None,
             )
             if segment_info:
                 args[scene_idx] = segment_info["scene_path"]

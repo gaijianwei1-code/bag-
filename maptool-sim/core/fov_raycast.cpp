@@ -83,7 +83,7 @@ FovResult cast_rect(const GridProjection& grid, double x, double y, double yaw,
         float wx, wy;
     };
     std::vector<HitCand> cands;
-    const double half_cell = res * 0.5;
+    const double ref_x = (p.ref_x > -1e8) ? p.ref_x : p.x_min;
     for (int cy = cy0; cy <= cy1; ++cy) {
         const double wy = grid.min_y + (cy + 0.5) * res;
         const size_t row = static_cast<size_t>(cy) * grid.width;
@@ -91,12 +91,12 @@ FovResult cast_rect(const GridProjection& grid, double x, double y, double yaw,
             if (!grid.occupied[row + cx]) continue;
             const double wx = grid.min_x + (cx + 0.5) * res;
             const double dx = wx - x, dy = wy - y;
-            // 反变换到车体局部坐标系
+            // 反变换到车体局部坐标系（严格限定在矩形框内，防止红点飘出框外）
             const double lx =  dx * c + dy * s;
             const double ly = -dx * s + dy * c;
-            if (lx + half_cell < p.x_min || lx - half_cell > p.x_max) continue;
-            if (std::fabs(ly) - half_cell > p.half_width) continue;
-            const double d = std::max(0.0, lx - p.x_min);
+            if (lx < p.x_min || lx > p.x_max) continue;
+            if (std::fabs(ly) > p.half_width) continue;
+            const double d = std::max(0.0, lx - ref_x);
             cands.push_back({d, static_cast<float>(wx), static_cast<float>(wy)});
         }
     }

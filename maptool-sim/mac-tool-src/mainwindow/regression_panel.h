@@ -8,6 +8,7 @@
 #include <QString>
 #include <QList>
 #include <QMap>
+#include <QJsonObject>
 #include <functional>
 
 class QComboBox;
@@ -51,6 +52,8 @@ public:
     // T4.2 L2 分段重跑：注入从主窗口读取当前选中轨迹段 (fromIdx, toIdx, totalPoints) 的回调
     void setSegmentPicker(std::function<bool(int&, int&, int&)> picker);
     void syncSegmentFromMap(bool autoEnable = false);
+    // 画布改轨迹直接复跑：注入从主窗口导出当前编辑轨迹 JSON 的回调
+    void setTrajectoryExporter(std::function<QJsonObject()> exporter);
 
 signals:
     void runSubmitted(const QString& runId);
@@ -84,6 +87,7 @@ private:
     QComboBox* m_comboBag = nullptr;
     QComboBox* m_comboHistoryRun = nullptr;
     QCheckBox* m_chkRunnableOnly = nullptr;
+    QCheckBox* m_chkUseCanvasTraj = nullptr;
     QCheckBox* m_chkSegment = nullptr;
     QSpinBox* m_spinSegFrom = nullptr;
     QSpinBox* m_spinSegTo = nullptr;
@@ -92,6 +96,7 @@ private:
     QLabel* m_lblSegHint = nullptr;
     int m_segTotalPoints = 0;
     std::function<bool(int&, int&, int&)> m_segmentPicker;
+    std::function<QJsonObject()> m_trajExporter;
     QTableWidget* m_tableParams = nullptr;
     QSpinBox* m_spinDuration = nullptr;
     QPushButton* m_btnLoadParams = nullptr;
