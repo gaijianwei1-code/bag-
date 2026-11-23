@@ -78,11 +78,14 @@ MainWindow::MainWindow(QWidget *parent)
         fovToggle->setCheckable(true);
         connect(fovToggle, &QAction::triggered, this, &MainWindow::on_doFovToggle_triggered);
         if (!menus.isEmpty()) menus.first()->addAction(fovToggle);
+        ui->toolBar_PathEdit->addSeparator();
+        ui->toolBar_PathEdit->addAction(fovToggle);
         //控制面板 dock（含开关按钮，与 menu action 双向联动）
         QDockWidget* fovDock = fovLayer->createControlDock(this);
         addDockWidget(Qt::RightDockWidgetArea, fovDock);
         fovDock->hide();    //默认隐藏，避免改变现有布局；需要时从"窗口"里唤出
         connect(fovToggle, &QAction::toggled, fovDock, &QDockWidget::setVisible);
+        connect(fovDock, &QDockWidget::visibilityChanged, fovToggle, &QAction::setChecked);
         connect(fovLayer, &FovLayer::zmaxChanged, this, [this](double v) {
             if (fovCloud) {
                 fovGrid = std::make_unique<blz::GridProjection>(
@@ -101,11 +104,13 @@ MainWindow::MainWindow(QWidget *parent)
         liveToggle->setCheckable(true);
         QList<QMenu*> menus2 = ui->menubar->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
         if (!menus2.isEmpty()) menus2.first()->addAction(liveToggle);
+        ui->toolBar_PathEdit->addAction(liveToggle);
 
         QDockWidget* liveDock = liveLayer->createControlDock(this);
         addDockWidget(Qt::RightDockWidgetArea, liveDock);
         liveDock->hide();
         connect(liveToggle, &QAction::toggled, liveDock, &QDockWidget::setVisible);
+        connect(liveDock, &QDockWidget::visibilityChanged, liveToggle, &QAction::setChecked);
     }
     //===== T2.4 接线结束 =====
 
@@ -115,28 +120,23 @@ MainWindow::MainWindow(QWidget *parent)
         regPanel->setObjectName("doRegressionPanel");
         QList<QMenu*> menus3 = ui->menubar->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
         if (!menus3.isEmpty()) menus3.first()->addAction(regPanel);
+        ui->toolBar_PathEdit->addAction(regPanel);
         connect(regPanel, &QAction::triggered, this, [this]() {
             if (!regressionPanel) {
                 regressionPanel = new RegressionPanel(
                     QStringLiteral("http://127.0.0.1:9100"),
                     QStringLiteral("dev-token"), this);
-                // 提交成功后自动填入直播跟车的 run_id
+                // 提交成功后自动展开直播面板并自动连接直播
                 connect(regressionPanel, &RegressionPanel::runSubmitted,
                         this, [this](const QString& runId) {
-                    if (liveLayer) {
-                        // 自动断开旧连接，填入新 run_id
-                        liveLayer->stopLive();
-                        // 通过 dock 里的 run_id 输入框填入（简单方案）
-                        // 实际上可以通过 findChild 找到 QLineEdit
-                        if (auto* dock = findChild<QDockWidget*>("liveControlDock")) {
-                            if (auto* edit = dock->findChild<QLineEdit*>()) {
-                                // 找到 run_id 输入框（第二个 QLineEdit）
-                                auto edits = dock->findChildren<QLineEdit*>();
-                                if (edits.size() >= 2) edits[1]->setText(runId);
-                            }
-                        }
+                    if (auto* dock = findChild<QDockWidget*>("liveControlDock")) {
+                        dock->show();
+                        dock->raise();
                     }
-                    ui->statusbar->showMessage(tr("run 已提交：%1").arg(runId), 8000);
+                    if (liveLayer) {
+                        liveLayer->setRunIdAndConnect(runId);
+                    }
+                    ui->statusbar->showMessage(tr("run 已提交并连接直播：%1").arg(runId), 8000);
                 });
             }
             regressionPanel->show();

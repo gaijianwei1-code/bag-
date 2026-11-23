@@ -103,7 +103,9 @@ int main(int argc, char** argv)
 
     // 连上后必须是「持续出帧」或「给出明确失败原因」。
     // 注意：不能等终态——run 本身可能要跑几十秒，直播的意义就是边跑边看。
-    const bool gotFrames = waitFor([layer] { return layer->frameCount() > 0; }, 10000);
+    // POST /runs 后需经历 worktree + init_pose 提取 + wait_for_ros + roslaunch 冷启动，
+    // 实测首帧约 25–35s，10s 容易误报，故放宽至 45000 ms。
+    const bool gotFrames = waitFor([layer] { return layer->frameCount() > 0; }, 45000);
     CHECK(gotFrames, "收到至少 1 帧（frameCount>0）");
 
     // 确认是持续推送而非只 1 帧（界面才会「动起来」）
