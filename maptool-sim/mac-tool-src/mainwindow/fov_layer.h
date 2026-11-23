@@ -95,6 +95,7 @@ public slots:
     void setHalfAngleDeg(double v);
     void setZmax(double v);     // 仅存值 + 发 zmaxChanged（重投影由 mainwindow 做）
     void setRectMode(bool on);  // true=实车1.85×1.50m矩形检测，false=旧版扇形视锥
+    void setSafetyMargin(double v); // 实车矩形单侧安全裕度（对应 costmap 膨胀半径，默认 0.25m）
 
 signals:
     void recalculated(int hitCount);   // 重算完成（冒烟断言用）
@@ -118,6 +119,7 @@ private:
     double m_front_dist = 2.0;
     double m_half_angle_deg = 30.0;
     double m_zmax = 2.0;
+    double m_margin = 0.25;     // 实车矩形单侧安全裕度（对应 costmap 膨胀，默认 0.25m）
     bool m_rectMode = true;     // 默认实车矩形净空检测（1.85×1.50m + 前视框）
     bool m_enabled = false;
     int m_lastHitCount = 0;
@@ -133,6 +135,7 @@ private:
     // 控制面板控件（dock 持有所有权）
     QComboBox* m_comboMode = nullptr;
     QDoubleSpinBox* m_spinFront = nullptr;
+    QDoubleSpinBox* m_spinMargin = nullptr;
     QDoubleSpinBox* m_spinHalf = nullptr;
     QDoubleSpinBox* m_spinZmax = nullptr;
     QToolButton* m_btnToggle = nullptr;

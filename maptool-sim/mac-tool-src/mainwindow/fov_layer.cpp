@@ -202,13 +202,16 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
     m_comboMode->addItem(QObject::tr("扇形视锥"), false);
     m_comboMode->setCurrentIndex(m_rectMode ? 0 : 1);
 
-    m_spinFront = mkSpin(0.2, 20.0, 0.5, m_front_dist);
-    m_spinHalf  = mkSpin(1.0, 89.0, 5.0, m_half_angle_deg);
+    m_spinFront  = mkSpin(0.2, 20.0, 0.5, m_front_dist);
+    m_spinMargin = mkSpin(0.0, 1.50, 0.05, m_margin);
+    m_spinMargin->setEnabled(m_rectMode);
+    m_spinHalf   = mkSpin(1.0, 89.0, 5.0, m_half_angle_deg);
     m_spinHalf->setEnabled(!m_rectMode);
-    m_spinZmax  = mkSpin(0.0, 30.0, 0.5, m_zmax);
+    m_spinZmax   = mkSpin(0.0, 30.0, 0.5, m_zmax);
 
     form->addRow(QObject::tr("检测模式"), m_comboMode);
     form->addRow(QObject::tr("前视距离 (m)"), m_spinFront);
+    form->addRow(QObject::tr("安全裕度 (m)"), m_spinMargin);
     form->addRow(QObject::tr("视锥半角 (°)"), m_spinHalf);
     form->addRow(QObject::tr("高度过滤 zmax (m)"), m_spinZmax);
 
@@ -231,6 +234,8 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
 
     connect(m_spinFront, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &FovLayer::setFrontDist);
+    connect(m_spinMargin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &FovLayer::setSafetyMargin);
     connect(m_spinHalf, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &FovLayer::setHalfAngleDeg);
     connect(m_spinZmax, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -268,8 +273,15 @@ void FovLayer::setZmax(double v)
 void FovLayer::setRectMode(bool on)
 {
     m_rectMode = on;
+    if (m_spinMargin) m_spinMargin->setEnabled(on);
     if (m_spinHalf) m_spinHalf->setEnabled(!on);
     if (m_enabled) scheduleRecalc();
+}
+
+void FovLayer::setSafetyMargin(double v)
+{
+    m_margin = std::max(0.0, v);
+    if (m_enabled && m_rectMode) scheduleRecalc();
 }
 
 void FovLayer::scheduleRecalc()
@@ -337,10 +349,10 @@ void FovLayer::recalcAll()
 
             FovOverlayItem::Entry e;
             if (m_rectMode) {
-                // 实车矩形包络：车尾 -0.925m ~ 车头前沿 +0.925m + 前视距离，宽 1.50m
-                const double xMinPx = -kHalfL * invRes;
+                // 实车矩形包络：车尾(-0.925-margin) ~ 车头前沿(+0.925+前视距离)，半宽(0.75+margin)
+                const double xMinPx = -(kHalfL + m_margin) * invRes;
                 const double xMaxPx = (kHalfL + m_front_dist) * invRes;
-                const double hwPx   = kHalfW * invRes;
+                const double hwPx   = (kHalfW + m_margin) * invRes;
                 auto rot = [&](double lx, double ly) {
                     return pix + QPointF(lx * c - ly * s, lx * s + ly * c);
                 };
@@ -370,11 +382,11 @@ void FovLayer::recalcAll()
                 blz::FovResult res;
                 if (m_rectMode) {
                     blz::RectParams rp;
-                    rp.x_min = -kHalfL;
+                    rp.x_min = -(kHalfL + m_margin);
                     rp.x_max = kHalfL + m_front_dist;
-                    rp.half_width = kHalfW;
+                    rp.half_width = kHalfW + m_margin;
                     rp.max_hits = 48;
-                    rp.ref_x = kHalfL;   // 以车头前沿为 0 基准：车身内碰撞=0.0m，车头前方=前视净空
+                    rp.ref_x = kHalfL;   // 以车头前沿为 0 基准：车身/膨胀区内碰撞=0.0m，车头前方=前视净空
                     res = blz::cast_rect(*m_grid, wx, wy, yaw, rp);
                 } else {
                     blz::FovParams fp;
