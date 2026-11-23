@@ -148,7 +148,8 @@ def submit_run(req: RunRequest, x_bridge_token: Optional[str] = Header(None)):
         _runs[run_id] = {"state": "queued", "progress": 0.0, "frames": [],
                          "metrics": None, "req": req.model_dump(),
                          "init_pose": None, "record": None, "error": None,
-                         "param_set_id": None, "param_changes": [], "param_plan": []}
+                         "param_set_id": None, "param_changes": [], "param_plan": [],
+                         "segment_info": None}
 
     # T2.2：异步执行（首版单并发已在上面守卫）
     th = threading.Thread(target=_execute_run, args=(run_id, venue, req.model_dump()),
@@ -232,6 +233,7 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                 r["param_set_id"] = result.get("param_set_id")
                 r["param_changes"] = result.get("param_changes") or []
                 r["param_plan"] = result.get("param_plan") or []
+                r["segment_info"] = result.get("segment_info")
                 rec = result.get("record") or {}
                 r["metrics"] = _record_to_metrics(rec)
                 r["state"] = "done"
@@ -412,6 +414,7 @@ def list_runs(x_bridge_token: Optional[str] = Header(None)):
             "param_set_id": r.get("param_set_id"),
             "param_changes_count": cnt,
             "travel_m": metrics.get("travel_m"),
+            "segment_info": r.get("segment_info"),
             "msg": r.get("msg", ""),
         })
     return out
@@ -430,7 +433,8 @@ def get_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
             "req": run.get("req"),
             "param_set_id": run.get("param_set_id"),
             "param_changes": run.get("param_changes"),
-            "param_plan": run.get("param_plan")}
+            "param_plan": run.get("param_plan"),
+            "segment_info": run.get("segment_info")}
 
 
 @app.get("/runs/{run_id}/timeline")

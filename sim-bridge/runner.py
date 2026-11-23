@@ -10,6 +10,7 @@ bag_replay.py 接口：
   [--session-id <id>]  [--duration <s>]
 """
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -82,6 +83,166 @@ def build_replay_args(venue, req, run_id):
     scene_path = c.get("scene_yaml") or f"{WS_IN_CONTAINER}/sim/scenes/b_line_20261030_edge.yaml"
     args.extend(["--scene", scene_path])
     return args, baseline_ps, candidate_ps
+
+
+# ---------- 2.5 L2 分段重跑（T4.2：轨迹裁剪 + 最近安全点起步） ----------
+def normalize_segment(segment):
+    """规范化 segment 参数。支持按轨迹索引 (from_idx/to_idx) 或时间区间 (from_t/to_t)。"""
+    if not segment or not isinstance(segment, dict):
+        return None
+    if "from_idx" in segment or "to_idx" in segment:
+        a = int(segment.get("from_idx", 0))
+        b = int(segment.get("to_idx", a))
+        if a > b:
+            a, b = b, a
+        a = max(0, a)
+        b = max(a, b)
+        pad = max(0, int(segment.get("pad_points", 4)))
+        return {"mode": "index", "from_idx": a, "to_idx": b, "pad_points": pad}
+    if "from_t" in segment or "to_t" in segment:
+        t0 = max(0.0, float(segment.get("from_t", 0.0)))
+        t1 = max(t0, float(segment.get("to_t", t0)))
+        pad_s = max(0.0, float(segment.get("pad_s", 3.0)))
+        return {"mode": "time", "from_t": t0, "to_t": t1, "pad_s": pad_s}
+    return None
+
+
+def compute_segment_slice(points, segment, total_duration_s=76.0):
+    """根据 segment 与完整轨迹点列表，计算安全起步点、裁剪子轨迹与起步位姿。"""
+    n = len(points or [])
+    if n < 2:
+        raise RunError("SEGMENT_INVALID", f"轨迹点数不足（{n} < 2），无法分段")
+    seg = normalize_segment(segment)
+    if not seg:
+        return None
+
+    if seg["mode"] == "index":
+        from_idx = min(n - 1, seg["from_idx"])
+        to_idx = min(n - 1, seg["to_idx"])
+        pad_pts = seg["pad_points"]
+    else:
+        dur = max(1.0, float(total_duration_s or 76.0))
+        from_idx = min(n - 1, max(0, int(round((seg["from_t"] / dur) * (n - 1)))))
+        to_idx = min(n - 1, max(from_idx, int(round((seg["to_t"] / dur) * (n - 1)))))
+        pad_pts = max(1, int(round((seg["pad_s"] / dur) * (n - 1))))
+
+    safe_start = max(0, from_idx - pad_pts)
+    safe_end = min(n - 1, to_idx)
+    if safe_end <= safe_start:
+        safe_end = min(n - 1, safe_start + 1)
+    if safe_end <= safe_start and safe_start > 0:
+        safe_start = safe_end - 1
+
+    sub = points[safe_start:safe_end + 1]
+    p0, p1 = sub[0], sub[1]
+    init_x = float(p0.get("x", 0.0))
+    init_y = float(p0.get("y", 0.0))
+    if "yaw" in p0 and p0["yaw"] is not None:
+        init_yaw = float(p0["yaw"])
+    else:
+        init_yaw = math.atan2(float(p1.get("y", 0.0)) - init_y,
+                              float(p1.get("x", 0.0)) - init_x)
+
+    arc_len = 0.0
+    for i in range(len(sub) - 1):
+        arc_len += math.hypot(
+            float(sub[i + 1].get("x", 0.0)) - float(sub[i].get("x", 0.0)),
+            float(sub[i + 1].get("y", 0.0)) - float(sub[i].get("y", 0.0)),
+        )
+    auto_dur = max(12, min(120, int(math.ceil(arc_len / 0.30 + 10.0))))
+    return {
+        "sub_points": sub,
+        "from_idx": from_idx,
+        "to_idx": to_idx,
+        "safe_start_idx": safe_start,
+        "safe_end_idx": safe_end,
+        "total_points": n,
+        "point_count": len(sub),
+        "arc_len_m": round(arc_len, 2),
+        "init_pose": {"x": round(init_x, 4), "y": round(init_y, 4), "yaw": round(init_yaw, 5)},
+        "auto_duration_s": auto_dur,
+    }
+
+
+def _prepare_segment_scene(base_scene_path, segment, run_id,
+                           total_duration_s=76.0, req_duration_s=None):
+    """在容器内裁剪子轨迹并生成临时分段 scene YAML，返回 segment_meta。"""
+    import shlex
+    seg = normalize_segment(segment)
+    if not seg:
+        return None
+    seg_json = json.dumps(seg, ensure_ascii=False)
+    seg_traj_path = f"/tmp/blz_seg_traj_{run_id}.json"
+    seg_scene_path = f"/tmp/blz_seg_scene_{run_id}.yaml"
+    py_script = (
+        "import json, math, os, sys, yaml\n"
+        f"base_scene = {base_scene_path!r}\n"
+        f"seg = json.loads({seg_json!r})\n"
+        f"out_traj = {seg_traj_path!r}\n"
+        f"out_scene = {seg_scene_path!r}\n"
+        f"total_dur = float({float(total_duration_s or 76.0)!r})\n"
+        f"req_dur = {int(req_duration_s) if req_duration_s else None!r}\n"
+        f"run_id = {run_id!r}\n"
+        "with open(base_scene, 'r', encoding='utf-8') as f:\n"
+        "    scene = yaml.safe_load(f) or {}\n"
+        "traj_path = scene.get('trajectory') or '/root/catkin_ws/scenes/scenario_1793346971223/1793347176294.json'\n"
+        "with open(traj_path, 'r', encoding='utf-8') as f:\n"
+        "    traj = json.load(f)\n"
+        "pts = traj.get('points') if isinstance(traj, dict) else traj\n"
+        "n = len(pts or [])\n"
+        "if n < 2:\n"
+        "    print(json.dumps({'error': 'SEGMENT_INVALID', 'detail': f'轨迹点数不足: {n}'})); sys.exit(2)\n"
+        "if seg['mode'] == 'index':\n"
+        "    fi = min(n - 1, max(0, int(seg['from_idx'])))\n"
+        "    ti = min(n - 1, max(fi, int(seg['to_idx'])))\n"
+        "    pad = max(0, int(seg.get('pad_points', 4)))\n"
+        "else:\n"
+        "    dur = max(1.0, total_dur)\n"
+        "    fi = min(n - 1, max(0, int(round((seg['from_t'] / dur) * (n - 1)))))\n"
+        "    ti = min(n - 1, max(fi, int(round((seg['to_t'] / dur) * (n - 1)))))\n"
+        "    pad = max(1, int(round((seg.get('pad_s', 3.0) / dur) * (n - 1))))\n"
+        "ss = max(0, fi - pad)\n"
+        "se = min(n - 1, ti)\n"
+        "if se <= ss: se = min(n - 1, ss + 1)\n"
+        "if se <= ss and ss > 0: ss = se - 1\n"
+        "sub = pts[ss:se + 1]\n"
+        "p0, p1 = sub[0], sub[1]\n"
+        "ix = float(p0.get('x', 0.0)); iy = float(p0.get('y', 0.0))\n"
+        "iyaw = float(p0['yaw']) if p0.get('yaw') is not None else math.atan2(float(p1.get('y', 0.0)) - iy, float(p1.get('x', 0.0)) - ix)\n"
+        "arc = sum(math.hypot(float(sub[i+1].get('x',0))-float(sub[i].get('x',0)), float(sub[i+1].get('y',0))-float(sub[i].get('y',0))) for i in range(len(sub)-1))\n"
+        "auto_dur = max(12, min(120, int(math.ceil(arc / 0.30 + 10.0))))\n"
+        "use_dur = int(req_dur) if req_dur else auto_dur\n"
+        "out_traj_obj = dict(traj) if isinstance(traj, dict) else {'points': sub}\n"
+        "out_traj_obj['points'] = sub\n"
+        "with open(out_traj, 'w', encoding='utf-8') as f:\n"
+        "    json.dump(out_traj_obj, f, ensure_ascii=False)\n"
+        "scene['scene_id'] = f\"{scene.get('scene_id', 'seg')}_seg_{run_id[-4:]}\"\n"
+        "scene['trajectory'] = out_traj\n"
+        "scene['initial_x'] = ix\n"
+        "scene['initial_y'] = iy\n"
+        "scene['initial_yaw'] = iyaw\n"
+        "scene['duration_s'] = use_dur\n"
+        "with open(out_scene, 'w', encoding='utf-8') as f:\n"
+        "    yaml.safe_dump(scene, f, allow_unicode=True, sort_keys=False)\n"
+        "print(json.dumps({'ok': True, 'scene_path': out_scene, 'traj_path': out_traj,\n"
+        "  'from_idx': fi, 'to_idx': ti, 'safe_start_idx': ss, 'safe_end_idx': se,\n"
+        "  'total_points': n, 'point_count': len(sub), 'arc_len_m': round(arc, 2),\n"
+        "  'init_pose': {'x': round(ix, 4), 'y': round(iy, 4), 'yaw': round(iyaw, 5)},\n"
+        "  'duration_s': use_dur, 'auto_duration_s': auto_dur}, ensure_ascii=False))\n"
+    )
+    rc, out, err = _exec(f"python3 -c {shlex.quote(py_script)}", timeout=30, check=False)
+    lines = [ln for ln in (out or "").splitlines() if ln.strip().startswith("{")]
+    data = None
+    if lines:
+        try:
+            data = json.loads(lines[-1])
+        except ValueError:
+            data = None
+    if rc != 0 or not data or not data.get("ok"):
+        code = (data or {}).get("error") or "SEGMENT_PREPARE_FAILED"
+        detail = (data or {}).get("detail") or (err or out or "")[-300:]
+        raise RunError(code, detail)
+    return data
 
 
 def _prepare_param_set_with_overrides(base_ps, new_ps, overrides=None, changes=None):
@@ -307,6 +468,21 @@ def submit(venue, req, run_id, on_status=None):
     try:
         status("queued", 0.25, "构建 bag_replay 参数")
         args, baseline_ps, candidate_ps = build_replay_args(venue, req, run_id)
+        segment_info = None
+        if req.get("segment"):
+            status("queued", 0.27, "裁剪 L2 分段轨迹并计算安全起步点")
+            scene_idx = args.index("--scene") + 1
+            dur_idx = args.index("--duration") + 1
+            base_scene = args[scene_idx]
+            segment_info = _prepare_segment_scene(
+                base_scene, req.get("segment"), run_id,
+                total_duration_s=venue.get("duration_s") or 76,
+                req_duration_s=req.get("duration_s"),
+            )
+            if segment_info:
+                args[scene_idx] = segment_info["scene_path"]
+                args[dur_idx] = str(int(segment_info["duration_s"]))
+                init_pose = segment_info["init_pose"]
         overrides = req.get("param_overrides") or {}
         changes = req.get("param_changes") or []
         param_meta = {"param_set_id": candidate_ps, "changes": [], "param_plan": []}
@@ -326,6 +502,26 @@ def submit(venue, req, run_id, on_status=None):
                 subprocess.run(
                     ["docker", "cp", f"{src_dir}", f"{CONTAINER}:{WS_IN_CONTAINER}/variant_tmp/"],
                     check=True, capture_output=True)
+
+        # T4.2 补丁：b_line_run.py 的 wrapper launch 路径若漏传 initial_x/y/yaw，自动补齐
+        import shlex
+        patch_py = (
+            "import os\n"
+            "anchor = '        fh.write(\\'    <arg name=\"bag\" value=\"%s\" />\\\\n\\' % _xml(recorded_bag))'\n"
+            "extra = (\n"
+            "    anchor + '\\n'\n"
+            "    + '        fh.write(\\'    <arg name=\"initial_x\" value=\"%s\" />\\\\n\\' % _xml(initial_pose[\"x\"]))\\n'\n"
+            "    + '        fh.write(\\'    <arg name=\"initial_y\" value=\"%s\" />\\\\n\\' % _xml(initial_pose[\"y\"]))\\n'\n"
+            "    + '        fh.write(\\'    <arg name=\"initial_yaw\" value=\"%s\" />\\\\n\\' % _xml(initial_pose[\"yaw\"]))'\n"
+            ")\n"
+            "for p in ('/root/catkin_ws/sim/scripts/b_line_run.py', '/root/catkin_ws/variant_tmp/sim/scripts/b_line_run.py'):\n"
+            "    if not os.path.isfile(p): continue\n"
+            "    s = open(p).read()\n"
+            "    if 'name=\"initial_x\"' in s: continue\n"
+            "    if anchor in s:\n"
+            "        open(p, 'w').write(s.replace(anchor, extra, 1))\n"
+        )
+        _exec(f"python3 -c {shlex.quote(patch_py)}", timeout=20, check=False)
 
         src = ("source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
                f"source {WS_IN_CONTAINER}/devel/setup.bash >/dev/null 2>&1; ")
@@ -347,7 +543,8 @@ def submit(venue, req, run_id, on_status=None):
                 "candidate_param_set": candidate_ps,
                 "param_set_id": param_meta.get("param_set_id") or candidate_ps,
                 "param_changes": param_meta.get("changes", []),
-                "param_plan": param_meta.get("param_plan", [])}
+                "param_plan": param_meta.get("param_plan", []),
+                "segment_info": segment_info}
     finally:
         # ps_{run_id} 参数集副本持久化保留用于追溯对比；仅清理临时 .tmp_ 前缀目录
         if tmp_ps and tmp_ps.startswith(".tmp_"):

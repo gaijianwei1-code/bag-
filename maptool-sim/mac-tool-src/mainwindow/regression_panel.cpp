@@ -63,6 +63,44 @@ void RegressionPanel::setupUi()
     formSel->addRow(tr("时长"), m_spinDuration);
     mainLayout->addWidget(grpSelect);
 
+    // 1.5 T4.2 L2 分段重跑（轨迹框选/点选片段，从最近安全点起播）
+    auto* grpSeg = new QGroupBox(tr("L2 分段重跑（T4.2 从最近安全点起播）"));
+    auto* vSeg = new QVBoxLayout(grpSeg);
+    auto* hSegTop = new QHBoxLayout;
+    m_chkSegment = new QCheckBox(tr("启用分段重跑"));
+    m_btnPickSegment = new QPushButton(tr("读取地图选定轨迹段"));
+    m_btnPickSegment->setToolTip(tr("先在地图工具栏用「点选点(选定开始/结束点)」选中片段，再点此一键带入"));
+    hSegTop->addWidget(m_chkSegment);
+    hSegTop->addStretch();
+    hSegTop->addWidget(m_btnPickSegment);
+    vSeg->addLayout(hSegTop);
+
+    auto* hSegRange = new QHBoxLayout;
+    m_spinSegFrom = new QSpinBox;
+    m_spinSegFrom->setRange(0, 9999);
+    m_spinSegFrom->setValue(15);
+    m_spinSegTo = new QSpinBox;
+    m_spinSegTo->setRange(1, 9999);
+    m_spinSegTo->setValue(30);
+    m_spinSegPad = new QSpinBox;
+    m_spinSegPad->setRange(0, 20);
+    m_spinSegPad->setValue(4);
+    m_spinSegPad->setSuffix(tr(" 点"));
+    hSegRange->addWidget(new QLabel(tr("起点:")));
+    hSegRange->addWidget(m_spinSegFrom);
+    hSegRange->addWidget(new QLabel(tr("终点:")));
+    hSegRange->addWidget(m_spinSegTo);
+    hSegRange->addWidget(new QLabel(tr("安全前推:")));
+    hSegRange->addWidget(m_spinSegPad);
+    hSegRange->addStretch();
+    vSeg->addLayout(hSegRange);
+
+    m_lblSegHint = new QLabel(tr("未启用分段：默认跑全程"));
+    m_lblSegHint->setStyleSheet("color: #6b7280; font-size: 12px;");
+    m_lblSegHint->setWordWrap(true);
+    vSeg->addWidget(m_lblSegHint);
+    mainLayout->addWidget(grpSeg);
+
     // 2. 参数表格 + T4.3 历史参数回填
     auto* grpParams = new QGroupBox(tr("参数覆盖与回填（T4.3 副本）"));
     auto* vParams = new QVBoxLayout(grpParams);
@@ -141,6 +179,17 @@ void RegressionPanel::setupUi()
     connect(m_chkRunnableOnly, &QCheckBox::toggled, this, [this](bool) {
         fetchVenues();
     });
+    connect(m_chkSegment, &QCheckBox::toggled, this, [this](bool) { updateSegmentUi(); });
+    connect(m_spinSegFrom, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int) { updateSegmentUi(); });
+    connect(m_spinSegTo, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int) { updateSegmentUi(); });
+    connect(m_spinSegPad, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int) { updateSegmentUi(); });
+    connect(m_btnPickSegment, &QPushButton::clicked, this, [this]() {
+        syncSegmentFromMap(/*autoEnable=*/true);
+    });
+    updateSegmentUi();
     connect(m_btnCancel, &QPushButton::clicked, this, &RegressionPanel::cancelActiveRun);
     connect(m_btnSubmit, &QPushButton::clicked, this, &RegressionPanel::submitRun);
     connect(m_comboBranch, &QComboBox::currentTextChanged,
@@ -210,6 +259,68 @@ void RegressionPanel::showError(const QString& msg)
     m_lblStatus->setStyleSheet("color: red;");
 }
 
+void RegressionPanel::setSegmentPicker(std::function<bool(int&, int&, int&)> picker)
+{
+    m_segmentPicker = std::move(picker);
+}
+
+void RegressionPanel::syncSegmentFromMap(bool autoEnable)
+{
+    if (!m_segmentPicker) {
+        if (autoEnable) showError(tr("当前窗口未绑定地图选点器"));
+        return;
+    }
+    int fromIdx = 0, toIdx = 0, total = 0;
+    if (!m_segmentPicker(fromIdx, toIdx, total) || total < 2) {
+        if (autoEnable) {
+            showError(tr("地图上尚未选中轨迹段：请先用顶部工具栏「点选点(选定开始/结束点)」选中起止点"));
+        }
+        return;
+    }
+    if (fromIdx > toIdx) std::swap(fromIdx, toIdx);
+    m_segTotalPoints = total;
+    m_spinSegFrom->setMaximum(total - 1);
+    m_spinSegTo->setMaximum(total - 1);
+    m_spinSegFrom->setValue(fromIdx);
+    m_spinSegTo->setValue(toIdx);
+    if (autoEnable) {
+        m_chkSegment->setChecked(true);
+        const int safeStart = qMax(0, fromIdx - m_spinSegPad->value());
+        const int pts = qMax(2, toIdx - safeStart + 1);
+        const int estSec = qBound(15, int((pts - 1) * 0.5 / 0.30 + 10.0), 120);
+        m_spinDuration->setValue(estSec);
+        m_lblStatus->setText(tr("已读取地图选段：第 %1~%2 点（共 %3 点），推荐时长 %4 秒")
+                                 .arg(fromIdx).arg(toIdx).arg(total).arg(estSec));
+        m_lblStatus->setStyleSheet("color: #15803d;");
+    }
+    updateSegmentUi();
+}
+
+void RegressionPanel::updateSegmentUi()
+{
+    const bool on = m_chkSegment && m_chkSegment->isChecked();
+    if (m_spinSegFrom) m_spinSegFrom->setEnabled(on);
+    if (m_spinSegTo) m_spinSegTo->setEnabled(on);
+    if (m_spinSegPad) m_spinSegPad->setEnabled(on);
+    if (!m_lblSegHint) return;
+    if (!on) {
+        m_lblSegHint->setText(tr("未启用分段：默认跑全程"));
+        m_lblSegHint->setStyleSheet("color: #6b7280; font-size: 12px;");
+        return;
+    }
+    int a = m_spinSegFrom->value();
+    int b = m_spinSegTo->value();
+    if (a > b) std::swap(a, b);
+    const int safeStart = qMax(0, a - m_spinSegPad->value());
+    const int count = qMax(2, b - safeStart + 1);
+    const double approxLen = (count - 1) * 0.5;
+    QString totalStr = m_segTotalPoints > 0 ? tr("/共%1点").arg(m_segTotalPoints) : QString();
+    m_lblSegHint->setText(
+        tr("安全起步：第 %1 点 → 第 %2 点（共 %3 点%4，约 %5m）")
+            .arg(safeStart).arg(b).arg(count).arg(totalStr).arg(approxLen, 0, 'f', 1));
+    m_lblSegHint->setStyleSheet("color: #1d4ed8; font-size: 12px;");
+}
+
 // ---------- 网络请求 ----------
 void RegressionPanel::fetchBranches()
 {
@@ -267,6 +378,18 @@ void RegressionPanel::submitRun()
     body["branch"] = selectedBranch();
     body["traj_json"] = QJsonObject();
     body["duration_s"] = m_spinDuration->value();
+
+    // T4.2 L2 分段重跑参数
+    if (m_chkSegment && m_chkSegment->isChecked()) {
+        int a = m_spinSegFrom->value();
+        int b = m_spinSegTo->value();
+        if (a > b) std::swap(a, b);
+        QJsonObject seg;
+        seg["from_idx"] = a;
+        seg["to_idx"] = b;
+        seg["pad_points"] = m_spinSegPad->value();
+        body["segment"] = seg;
+    }
 
     // 参数覆盖（T4.3 传完整 param_changes，同时保留 param_overrides 兼容）
     auto parseJsonVal = [](const QString& s) -> QJsonValue {

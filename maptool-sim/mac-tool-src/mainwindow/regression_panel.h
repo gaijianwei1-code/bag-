@@ -8,6 +8,7 @@
 #include <QString>
 #include <QList>
 #include <QMap>
+#include <functional>
 
 class QComboBox;
 class QTableWidget;
@@ -47,6 +48,9 @@ public:
     QList<ParamRow> paramChanges() const;
     int durationSeconds() const;
     QString runId() const { return m_lastRunId; }
+    // T4.2 L2 分段重跑：注入从主窗口读取当前选中轨迹段 (fromIdx, toIdx, totalPoints) 的回调
+    void setSegmentPicker(std::function<bool(int&, int&, int&)> picker);
+    void syncSegmentFromMap(bool autoEnable = false);
 
 signals:
     void runSubmitted(const QString& runId);
@@ -64,6 +68,7 @@ private slots:
 private:
     void setupUi();
     void updateSubmitState();
+    void updateSegmentUi();
     void showError(const QString& msg);
     void addParamRow(const QString& file, const QString& key,
                      const QString& from, const QString& to);
@@ -79,6 +84,14 @@ private:
     QComboBox* m_comboBag = nullptr;
     QComboBox* m_comboHistoryRun = nullptr;
     QCheckBox* m_chkRunnableOnly = nullptr;
+    QCheckBox* m_chkSegment = nullptr;
+    QSpinBox* m_spinSegFrom = nullptr;
+    QSpinBox* m_spinSegTo = nullptr;
+    QSpinBox* m_spinSegPad = nullptr;
+    QPushButton* m_btnPickSegment = nullptr;
+    QLabel* m_lblSegHint = nullptr;
+    int m_segTotalPoints = 0;
+    std::function<bool(int&, int&, int&)> m_segmentPicker;
     QTableWidget* m_tableParams = nullptr;
     QSpinBox* m_spinDuration = nullptr;
     QPushButton* m_btnLoadParams = nullptr;

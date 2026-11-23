@@ -126,6 +126,35 @@ MainWindow::MainWindow(QWidget *parent)
                 regressionPanel = new RegressionPanel(
                     QStringLiteral("http://127.0.0.1:9100"),
                     QStringLiteral("dev-token"), this);
+                // T4.2 L2 分段重跑：读取地图上「点选点(选定开始/结束点)」选中的轨迹区间
+                regressionPanel->setSegmentPicker([this](int& fromIdx, int& toIdx, int& totalPoints) -> bool {
+                    eraseNullptr_pointSelected_line();
+                    if (pointSelected_line.isEmpty()) return false;
+                    BPathItem* pathItem = nullptr;
+                    for (const auto& ptr : pointSelected_line) {
+                        if (ptr && ptr->parentItem()) {
+                            pathItem = dynamic_cast<BPathItem*>(ptr->parentItem());
+                            if (pathItem) break;
+                        }
+                    }
+                    if (!pathItem) return false;
+                    totalPoints = pathItem->pointsNumber();
+                    int minIdx = totalPoints, maxIdx = -1;
+                    for (int i = 0; i < totalPoints; ++i) {
+                        BPointItem* pt = pathItem->getElement(i);
+                        for (const auto& sel : pointSelected_line) {
+                            if (sel.data() == pt) {
+                                if (i < minIdx) minIdx = i;
+                                if (i > maxIdx) maxIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (maxIdx < 0 || minIdx > maxIdx) return false;
+                    fromIdx = minIdx;
+                    toIdx = maxIdx;
+                    return true;
+                });
                 // 提交成功后自动展开直播面板并自动连接直播
                 connect(regressionPanel, &RegressionPanel::runSubmitted,
                         this, [this](const QString& runId) {
@@ -139,6 +168,7 @@ MainWindow::MainWindow(QWidget *parent)
                     ui->statusbar->showMessage(tr("run 已提交并连接直播：%1").arg(runId), 8000);
                 });
             }
+            regressionPanel->syncSegmentFromMap(/*autoEnable=*/false);
             regressionPanel->show();
             regressionPanel->raise();
         });
