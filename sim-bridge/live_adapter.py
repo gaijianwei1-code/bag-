@@ -73,6 +73,7 @@ class TimelineAdapter:
         # T3.1: 最近一次观测到的 lookahead/carrot（由 state 消息捎带，见下）
         self.lookahead = None
         self.carrot = None
+        self._carrot_local = None
 
     def feed(self, obj):
         """输入一条 live_bridge JSON 对象，返回 timeline 消息列表（可能为空）。"""
@@ -94,6 +95,8 @@ class TimelineAdapter:
         # T3.1 扩展：独立观测节点产出的 lookahead / carrot
         if t == "lookahead":
             self.lookahead = obj.get("dist")
+            if "x" in obj and "y" in obj:
+                self._carrot_local = (float(obj["x"]), float(obj["y"]))
             return []
         if t == "carrot":
             self.carrot = obj.get("xy")
@@ -104,13 +107,20 @@ class TimelineAdapter:
         if "x" not in obj:
             return []
         self.pose = (obj["x"], obj["y"], obj.get("yaw", 0.0))
+        carrot = obj.get("carrot", self.carrot)
+        if carrot is None and self._carrot_local is not None:
+            cx, cy = self._carrot_local
+            yaw = float(obj.get("yaw", 0.0))
+            c, s = math.cos(yaw), math.sin(yaw)
+            carrot = [round(obj["x"] + c * cx - s * cy, 4),
+                      round(obj["y"] + s * cx + c * cy, 4)]
         frame = {
             "t": obj.get("t", 0.0),
             "x": obj["x"], "y": obj["y"], "yaw": obj.get("yaw", 0.0),
             "speed": obj.get("speed", 0.0),
             "lookahead": obj.get("lookahead", self.lookahead),
             "loc_score": obj.get("loc_score"),
-            "carrot": obj.get("carrot", self.carrot),
+            "carrot": carrot,
             "front_hits": obj.get("front_hits"),
         }
         # progress 属 status 语义，单独发一条便于 UI 进度条

@@ -526,5 +526,6 @@ async def run_stream(ws: WebSocket, run_id: str):
                                     "msg": (err or {}).get("msg") or "finished"})
                 break
             await asyncio.sleep(0.2)
+        await ws.close(code=1000)
     except Exception:  # noqa: BLE001  客户端断开等异常静默处理
         pass

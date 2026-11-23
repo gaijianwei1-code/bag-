@@ -36,6 +36,7 @@ class Observer:
         self.buf = None
         self.count = 0
         self.theta = None
+        self.map_xy = None
         self.tf_buf = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf_buf)
         rospy.Subscriber(TOPIC_CARROT, PointStamped, self.cb, queue_size=5)
@@ -89,6 +90,9 @@ def main():
         if obs.buf is not None:
             emit(obs.buf)
             obs.buf = None
+        if obs.map_xy is not None:
+            emit({"type": "carrot", "xy": obs.map_xy})
+            obs.map_xy = None
             if obs.count % 50 == 0 and obs.count != last_n:
                 last_n = obs.count
         time.sleep(period)

@@ -64,10 +64,16 @@ QRectF LiveOverlayItem::contentRect() const
         r = has ? r.united(rr) : rr;
         has = true;
     };
-    if (m_hasVehicle) add(QRectF(m_vehicle.x() - 20, m_vehicle.y() - 20, 40, 40));
+    if (m_hasVehicle) {
+        const double rBody = 0.5 * std::hypot(m_bodyLenPx, m_bodyWidPx) + 10.0;
+        add(QRectF(m_vehicle.x() - rBody, m_vehicle.y() - rBody, rBody * 2.0, rBody * 2.0));
+    }
     if (m_hasVehicle && m_hasLookahead && m_lookaheadPx > 0.0) {
-        const QPointF tip = m_vehicle + QPointF(m_lookaheadPx * std::cos(m_yawPix),
-                                                m_lookaheadPx * std::sin(m_yawPix));
+        const double frontEnd = m_bodyLenPx * 0.5 + m_lookaheadPx;
+        const double rLa = std::hypot(frontEnd, m_bodyWidPx * 0.5) + 16.0;
+        add(QRectF(m_vehicle.x() - rLa, m_vehicle.y() - rLa, rLa * 2.0, rLa * 2.0));
+        const QPointF tip = m_vehicle + QPointF(frontEnd * std::cos(m_yawPix),
+                                                frontEnd * std::sin(m_yawPix));
         add(QRectF(tip.x() - 48, tip.y() - 24, 96, 48));
     }
     if (m_hasCarrot) add(QRectF(m_carrot.x() - 8, m_carrot.y() - 8, 16, 16));
@@ -88,6 +94,16 @@ void LiveOverlayItem::setVehicle(const QPointF& px, double yawPix, bool valid)
     m_vehicle = px;
     m_yawPix = yawPix;
     m_hasVehicle = valid;
+    m_brect = contentRect();
+    update();
+}
+
+void LiveOverlayItem::setVehicleSize(double lengthPx, double widthPx)
+{
+    if (lengthPx <= 0.0 || widthPx <= 0.0) return;
+    prepareGeometryChange();
+    m_bodyLenPx = lengthPx;
+    m_bodyWidPx = widthPx;
     m_brect = contentRect();
     update();
 }
@@ -176,59 +192,97 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
         p->drawPolyline(m_livePath.constData(), m_livePath.size());
     }
 
-    // 3. 三层归因 - 层 1：前视命中点（红点 + 浅色外圈）
-    if (m_showHits && !m_hits.isEmpty()) {
-        p->setPen(QPen(QColor(255, 255, 255, 210), 1.0));
-        p->setBrush(QColor(235, 45, 45, 230));
-        for (const auto& h : m_hits)
-            p->drawEllipse(h, 3.5, 3.5);
-    }
-
-    // 4. 三层归因 - 层 2：carrot 目标点（绿十字圆标 + 到车虚线）
-    if (m_showCarrot && m_hasCarrot) {
-        if (m_hasVehicle) {
-            QPen linkPen(QColor(22, 163, 74, 180), 1.5, Qt::DashLine);
-            linkPen.setCosmetic(true);
-            p->setPen(linkPen);
-            p->drawLine(m_vehicle, m_carrot);
-        }
-        QPen cPen(QColor(22, 163, 74, 240), 1.8);
-        cPen.setCosmetic(true);
-        p->setPen(cPen);
-        const double s = 6.0;
-        p->drawLine(m_carrot + QPointF(-s, 0), m_carrot + QPointF(s, 0));
-        p->drawLine(m_carrot + QPointF(0, -s), m_carrot + QPointF(0, s));
-        p->setBrush(Qt::NoBrush);
-        p->drawEllipse(m_carrot, s, s);
-    }
-
-    // 5. 三层归因 - 层 3：lookahead 距离线段（青色实线 + 末端短横标尺 + 数值标注）
-    if (m_showLookahead && m_hasVehicle && m_hasLookahead && m_lookaheadPx > 0.0) {
-        const double c = std::cos(m_yawPix), s = std::sin(m_yawPix);
-        const QPointF tip = m_vehicle + QPointF(m_lookaheadPx * c, m_lookaheadPx * s);
-        const QPointF norm(-s * 6.0, c * 6.0);
-        QPen laPen(QColor(14, 165, 233, 240), 2.0);
-        laPen.setCosmetic(true);
-        p->setPen(laPen);
-        p->drawLine(m_vehicle, tip);
-        p->drawLine(tip - norm, tip + norm);
-        p->setFont(QFont("Sans Serif", 9, QFont::Bold));
-        p->drawText(tip + QPointF(6, -6),
-                    QStringLiteral("LA %1m").arg(m_lookaheadM, 0, 'f', 2));
-    }
-
-    // 6. 车辆图标（蓝色三角，指向车头）
+    // 3. 车身框（按实车尺寸 1.85m × 1.50m 按地图分辨率精确换算，半透明蓝框 + 车头朝向标记）
     if (m_hasVehicle) {
-        const double len = 24.0, wid = 14.0;
+        const double halfL = m_bodyLenPx * 0.5;
+        const double halfW = m_bodyWidPx * 0.5;
         const double c = std::cos(m_yawPix), s = std::sin(m_yawPix);
         auto rot = [&](double x, double y) {
             return m_vehicle + QPointF(x * c - y * s, x * s + y * c);
         };
-        QPolygonF tri;
-        tri << rot(len, 0) << rot(-len * 0.6, wid) << rot(-len * 0.6, -wid);
-        p->setPen(QPen(QColor(255, 255, 255, 230), 1.5));
-        p->setBrush(QColor(0, 110, 255, 235));
-        p->drawPolygon(tri);
+        QPolygonF bodyRect;
+        bodyRect << rot(halfL, -halfW)
+                 << rot(halfL,  halfW)
+                 << rot(-halfL, halfW)
+                 << rot(-halfL, -halfW);
+        QPen bodyPen(QColor(0, 110, 255, 235), 1.8);
+        bodyPen.setCosmetic(true);
+        p->setPen(bodyPen);
+        p->setBrush(QColor(0, 110, 255, 38));
+        p->drawPolygon(bodyRect);
+
+        // 车头前沿加粗边线 + 小前指三角，明确车头方向
+        QPen frontPen(QColor(0, 85, 220, 250), 3.0);
+        frontPen.setCosmetic(true);
+        p->setPen(frontPen);
+        p->drawLine(rot(halfL, -halfW), rot(halfL, halfW));
+        QPolygonF nose;
+        nose << rot(halfL + 4.0, 0.0)
+             << rot(halfL - 3.0, -3.5)
+             << rot(halfL - 3.0,  3.5);
+        p->setPen(Qt::NoPen);
+        p->setBrush(QColor(0, 95, 240, 220));
+        p->drawPolygon(nose);
+    }
+
+    // 4. 三层归因 - 层 3：前视距离（LA）半透明红色长方形引导框（从车头前沿往前伸 LA，宽=车身宽 1.50m）
+    if (m_showLookahead && m_hasVehicle && m_hasLookahead && m_lookaheadPx > 0.0) {
+        const double halfL = m_bodyLenPx * 0.5;
+        const double frontEnd = halfL + m_lookaheadPx;
+        const double halfW = m_bodyWidPx * 0.5;
+        const double c = std::cos(m_yawPix), s = std::sin(m_yawPix);
+        auto rot = [&](double x, double y) {
+            return m_vehicle + QPointF(x * c - y * s, x * s + y * c);
+        };
+        QPolygonF laRect;
+        laRect << rot(halfL,    -halfW)
+               << rot(frontEnd, -halfW)
+               << rot(frontEnd,  halfW)
+               << rot(halfL,     halfW);
+        QPen laPen(QColor(220, 38, 38, 210), 1.6, Qt::DashLine);
+        laPen.setCosmetic(true);
+        p->setPen(laPen);
+        p->setBrush(QColor(239, 68, 68, 60));
+        p->drawPolygon(laRect);
+
+        // 前端 LA 实线边 + 数值标注
+        QPen tipPen(QColor(220, 38, 38, 245), 2.2);
+        tipPen.setCosmetic(true);
+        p->setPen(tipPen);
+        p->drawLine(rot(frontEnd, -halfW), rot(frontEnd, halfW));
+        p->setFont(QFont("Sans Serif", 8, QFont::Bold));
+        p->drawText(rot(frontEnd, -halfW) + QPointF(4, -4),
+                    QStringLiteral("LA %1m").arg(m_lookaheadM, 0, 'f', 2));
+    }
+
+    // 5. 三层归因 - 层 1：前视命中点（红点 + 白色外圈）
+    if (m_showHits && !m_hits.isEmpty()) {
+        QPen hPen(QColor(255, 255, 255, 220), 1.2);
+        hPen.setCosmetic(true);
+        p->setPen(hPen);
+        p->setBrush(QColor(235, 45, 45, 235));
+        for (const auto& h : m_hits)
+            p->drawEllipse(h, 3.0, 3.0);
+    }
+
+    // 6. 三层归因 - 层 2：carrot 目标点（绿十字圆标 + 中心点 + 到车虚线，置顶最清晰）
+    if (m_showCarrot && m_hasCarrot) {
+        if (m_hasVehicle) {
+            QPen linkPen(QColor(22, 163, 74, 200), 1.8, Qt::DashLine);
+            linkPen.setCosmetic(true);
+            p->setPen(linkPen);
+            p->drawLine(m_vehicle, m_carrot);
+        }
+        QPen cPen(QColor(22, 163, 74, 250), 2.2);
+        cPen.setCosmetic(true);
+        p->setPen(cPen);
+        const double s = 5.0;
+        p->drawLine(m_carrot + QPointF(-s, 0), m_carrot + QPointF(s, 0));
+        p->drawLine(m_carrot + QPointF(0, -s), m_carrot + QPointF(0, s));
+        p->setBrush(Qt::NoBrush);
+        p->drawEllipse(m_carrot, s, s);
+        p->setBrush(QColor(22, 163, 74, 240));
+        p->drawEllipse(m_carrot, 1.5, 1.5);
     }
 }
 
@@ -245,8 +299,12 @@ LiveLayer::LiveLayer(QObject* parent) : QObject(parent)
             return;
         }
         m_followLatest = false;
-        seekToFrame(m_currentFrame + 1);
+        seekToFrameInternal(m_currentFrame + 1, /*animate=*/true);
     });
+
+    m_animTimer = new QTimer(this);
+    m_animTimer->setInterval(16);   // ~60 FPS 平滑插值
+    connect(m_animTimer, &QTimer::timeout, this, &LiveLayer::stepAnimation);
 }
 
 LiveLayer::~LiveLayer()
@@ -268,6 +326,9 @@ void LiveLayer::setMapInfo(double resolution, double originX, double originY, in
     m_originX = originX;
     m_originY = originY;
     m_pgmHeight = pgmHeight;
+    // 必须用 m_overlayGuard 判活：openYaml() 调用前 scene->clear() 可能已析构旧图元
+    if (m_overlayGuard && m_resolution > 0.0)
+        m_overlayGuard->setVehicleSize(1.85 / m_resolution, 1.50 / m_resolution);
 }
 
 void LiveLayer::destroyOverlay()
@@ -288,6 +349,8 @@ void LiveLayer::rebuildOverlay()
     if (!m_overlayGuard) {
         auto* item = new LiveOverlayItem;
         item->setZValue(0.8);
+        if (m_resolution > 0.0)
+            item->setVehicleSize(1.85 / m_resolution, 1.50 / m_resolution);
         item->setLayerVisibility(m_showHits, m_showCarrot, m_showLookahead);
         m_scene->addItem(item);
         m_overlayGuard = item;
@@ -340,7 +403,7 @@ QDockWidget* LiveLayer::createControlDock(QMainWindow* win)
     auto* hChk = new QHBoxLayout;
     m_chkHits = new QCheckBox(QObject::tr("命中点(红)"));
     m_chkCarrot = new QCheckBox(QObject::tr("Carrot(绿)"));
-    m_chkLookahead = new QCheckBox(QObject::tr("Lookahead(青)"));
+    m_chkLookahead = new QCheckBox(QObject::tr("前视框(红)"));
     m_chkHits->setChecked(m_showHits);
     m_chkCarrot->setChecked(m_showCarrot);
     m_chkLookahead->setChecked(m_showLookahead);
@@ -353,8 +416,8 @@ QDockWidget* LiveLayer::createControlDock(QMainWindow* win)
         m_showHits = m_chkHits ? m_chkHits->isChecked() : true;
         m_showCarrot = m_chkCarrot ? m_chkCarrot->isChecked() : true;
         m_showLookahead = m_chkLookahead ? m_chkLookahead->isChecked() : true;
-        if (m_overlay)
-            m_overlay->setLayerVisibility(m_showHits, m_showCarrot, m_showLookahead);
+        if (m_overlayGuard)
+            m_overlayGuard->setLayerVisibility(m_showHits, m_showCarrot, m_showLookahead);
     };
     connect(m_chkHits, &QCheckBox::toggled, this, applyVis);
     connect(m_chkCarrot, &QCheckBox::toggled, this, applyVis);
@@ -510,6 +573,8 @@ void LiveLayer::startLive(const QString& baseUrl, const QString& runId, const QS
     m_recordedPath.clear();
     m_currentFrame = -1;
     m_followLatest = true;
+    m_animInit = false;
+    if (m_animTimer && m_animTimer->isActive()) m_animTimer->stop();
     if (m_playTimer && m_playTimer->isActive()) m_playTimer->stop();
     if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
     updateTimelineUi();
@@ -587,10 +652,16 @@ void LiveLayer::onDisconnected()
 
 void LiveLayer::onError(const QString& err)
 {
-    // 服务端已明确告知失败原因时，不要再被 socket 的 "远端关闭" 盖掉——
-    // 那会让用户看不到真正的错误（如"缺 container.bag"）。
+    // 服务端已明确告知失败或已完成时，不要再被 socket 的 "远端关闭" 盖掉——
+    // 否则用户看不到真正的错误（如"缺 container.bag"）或完成态指标摘要。
     if (m_state == QStringLiteral("failed") && !m_lastError.isEmpty()) {
         emit stateChanged(m_state, 0.0, m_lastError);
+        return;
+    }
+    if (m_state == QStringLiteral("done") || !m_metricsSummary.isEmpty()) {
+        m_state = QStringLiteral("done");
+        emit stateChanged(m_state, 1.0,
+                          m_metricsSummary.isEmpty() ? QStringLiteral("已完成") : m_metricsSummary);
         return;
     }
     m_lastError = err;
@@ -685,7 +756,7 @@ void LiveLayer::onTextMessage(const QString& msg)
         updateTimelineUi();
 
         if (m_followLatest)
-            seekToFrame(m_timeline.size() - 1);
+            seekToFrameInternal(m_timeline.size() - 1, /*animate=*/m_animInit);
 
         emit statsChanged(m_frames, m_hitTotal);
         return;
@@ -761,31 +832,118 @@ void LiveLayer::updateTimelineUi()
     }
 }
 
+void LiveLayer::applyOverlayPose(double x, double y, double yaw, double la,
+                                 bool hasCarrot, const QPointF& carrotWorld)
+{
+    if (!m_overlayGuard) return;
+    m_overlayGuard->setVehicle(worldToPixel(x, y), -yaw, true);
+    if (hasCarrot)
+        m_overlayGuard->setCarrot(worldToPixel(carrotWorld.x(), carrotWorld.y()), true);
+    else
+        m_overlayGuard->setCarrot(QPointF(), false);
+
+    const bool hasLa = (la >= 0.0);
+    const double laPx = (hasLa && m_resolution > 0.0) ? (la / m_resolution) : 0.0;
+    m_overlayGuard->setLookahead(hasLa ? la : 0.0, laPx, hasLa);
+}
+
+void LiveLayer::stepAnimation()
+{
+    if (!m_animInit) {
+        if (m_animTimer) m_animTimer->stop();
+        return;
+    }
+    // 60 FPS 指数平滑，约 180ms 追齐 5 Hz 原始帧，消除一卡一卡的顿挫感
+    constexpr double kAlpha = 0.22;
+    const double dx = m_tgtX - m_dispX;
+    const double dy = m_tgtY - m_dispY;
+    const double dyaw = std::atan2(std::sin(m_tgtYaw - m_dispYaw),
+                                   std::cos(m_tgtYaw - m_dispYaw));
+
+    m_dispX += dx * kAlpha;
+    m_dispY += dy * kAlpha;
+    m_dispYaw += dyaw * kAlpha;
+
+    double dla = 0.0;
+    if (m_tgtLa >= 0.0) {
+        if (m_dispLa < 0.0) m_dispLa = m_tgtLa;
+        dla = m_tgtLa - m_dispLa;
+        m_dispLa += dla * kAlpha;
+    } else {
+        m_dispLa = -1.0;
+    }
+
+    double dcar = 0.0;
+    if (m_tgtHasCarrot) {
+        if (!m_dispHasCarrot) {
+            m_dispCarrot = m_tgtCarrot;
+            m_dispHasCarrot = true;
+        } else {
+            const QPointF dc = m_tgtCarrot - m_dispCarrot;
+            dcar = std::hypot(dc.x(), dc.y());
+            m_dispCarrot += dc * kAlpha;
+        }
+    } else {
+        m_dispHasCarrot = false;
+    }
+
+    const bool settled = (std::hypot(dx, dy) < 0.002 &&
+                          std::fabs(dyaw) < 0.002 &&
+                          std::fabs(dla) < 0.003 &&
+                          dcar < 0.003);
+    if (settled) {
+        m_dispX = m_tgtX;
+        m_dispY = m_tgtY;
+        m_dispYaw = m_tgtYaw;
+        m_dispLa = m_tgtLa;
+        m_dispHasCarrot = m_tgtHasCarrot;
+        m_dispCarrot = m_tgtCarrot;
+        if (m_animTimer) m_animTimer->stop();
+    }
+    applyOverlayPose(m_dispX, m_dispY, m_dispYaw, m_dispLa, m_dispHasCarrot, m_dispCarrot);
+}
+
 void LiveLayer::seekToFrame(int index)
+{
+    seekToFrameInternal(index, /*animate=*/false);
+}
+
+void LiveLayer::seekToFrameInternal(int index, bool animate)
 {
     if (index < 0 || index >= m_timeline.size()) return;
     rebuildOverlay();
     m_currentFrame = index;
     const LiveFrame& f = m_timeline.at(index);
 
-    if (m_overlay) {
-        m_overlay->setVehicle(worldToPixel(f.x, f.y), -f.yaw, true);
-        if (m_recordedPath.size() >= index + 1)
-            m_overlay->setLivePath(m_recordedPath.mid(0, index + 1));
+    m_tgtX = f.x;
+    m_tgtY = f.y;
+    m_tgtYaw = f.yaw;
+    m_tgtLa = f.lookahead;
+    m_tgtHasCarrot = f.hasCarrot;
+    m_tgtCarrot = f.carrotWorld;
 
-        if (f.hasCarrot)
-            m_overlay->setCarrot(worldToPixel(f.carrotWorld.x(), f.carrotWorld.y()), true);
-        else
-            m_overlay->setCarrot(QPointF(), false);
+    if (m_overlayGuard) {
+        if (m_recordedPath.size() >= index + 1)
+            m_overlayGuard->setLivePath(m_recordedPath.mid(0, index + 1));
 
         QVector<QPointF> pixHits;
         pixHits.reserve(f.hitsWorld.size());
         for (const auto& wh : f.hitsWorld) pixHits << worldToPixel(wh.x(), wh.y());
-        m_overlay->setHits(pixHits);
+        m_overlayGuard->setHits(pixHits);
+    }
 
-        const bool hasLa = (f.lookahead >= 0.0);
-        const double laPx = (hasLa && m_resolution > 0.0) ? (f.lookahead / m_resolution) : 0.0;
-        m_overlay->setLookahead(hasLa ? f.lookahead : 0.0, laPx, hasLa);
+    if (animate && m_animInit && m_animTimer) {
+        if (!m_animTimer->isActive()) m_animTimer->start();
+    } else {
+        if (m_animTimer && m_animTimer->isActive()) m_animTimer->stop();
+        m_animInit = true;
+        m_dispX = m_tgtX;
+        m_dispY = m_tgtY;
+        m_dispYaw = m_tgtYaw;
+        m_dispLa = m_tgtLa;
+        m_dispHasCarrot = m_tgtHasCarrot;
+        m_dispCarrot = m_tgtCarrot;
+        applyOverlayPose(m_dispX, m_dispY, m_dispYaw, m_dispLa, m_dispHasCarrot, m_dispCarrot);
     }
 
     if (m_slider) {
@@ -835,6 +993,9 @@ QString LiveLayer::stateLabelText() const
 bool LiveLayer::exportFrameScreenshot(const QString& filePath)
 {
     if (!m_scene || filePath.isEmpty()) return false;
+    // 导出单帧截图前确保画面精确贴合当前帧，不处于插值过渡态
+    if (m_animTimer && m_animTimer->isActive() && m_currentFrame >= 0)
+        seekToFrameInternal(m_currentFrame, /*animate=*/false);
     QFileInfo fi(filePath);
     fi.dir().mkpath(QStringLiteral("."));
 

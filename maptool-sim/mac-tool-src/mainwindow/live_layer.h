@@ -50,6 +50,7 @@ public:
     explicit LiveOverlayItem(QGraphicsItem* parent = nullptr);
 
     void setVehicle(const QPointF& px, double yawPix, bool valid);
+    void setVehicleSize(double lengthPx, double widthPx);
     void setTruthPath(const QVector<QPointF>& pix);
     void setLivePath(const QVector<QPointF>& pix);
     void setHits(const QVector<QPointF>& pix);
@@ -78,6 +79,8 @@ private:
     QPointF m_vehicle;
     double m_yawPix = 0.0;
     bool m_hasVehicle = false;
+    double m_bodyLenPx = 37.0;   // 默认 1.85m @ 0.05m/px
+    double m_bodyWidPx = 30.0;   // 默认 1.50m @ 0.05m/px
     QVector<QPointF> m_truthPath;
     QVector<QPointF> m_livePath;
     QVector<QPointF> m_hits;
@@ -119,9 +122,9 @@ public:
     QString metricsSummary() const { return m_metricsSummary; }
     QString stateLabelText() const;
     bool overlayAlive() const { return m_overlayGuard != nullptr; }
-    bool overlayHasVehicle() const { return m_overlay && m_overlay->hasVehicle(); }
-    bool overlayHasLookahead() const { return m_overlay && m_overlay->hasLookahead(); }
-    bool overlayHasCarrot() const { return m_overlay && m_overlay->hasCarrot(); }
+    bool overlayHasVehicle() const { return m_overlayGuard && m_overlayGuard->hasVehicle(); }
+    bool overlayHasLookahead() const { return m_overlayGuard && m_overlayGuard->hasLookahead(); }
+    bool overlayHasCarrot() const { return m_overlayGuard && m_overlayGuard->hasCarrot(); }
     double overlayZ() const { return m_overlayGuard ? m_overlayGuard->zValue() : -999.0; }
     QString state() const { return m_state; }
     bool exportFrameScreenshot(const QString& filePath);
@@ -147,6 +150,10 @@ private:
     void destroyOverlay();
     void updateTimelineUi();
     void togglePlay();
+    void seekToFrameInternal(int index, bool animate);
+    void applyOverlayPose(double x, double y, double yaw, double la,
+                          bool hasCarrot, const QPointF& carrotWorld);
+    void stepAnimation();
     QPointF worldToPixel(double wx, double wy) const;
 
     BQGraphicsScene* m_scene = nullptr;
@@ -177,6 +184,15 @@ private:
     bool m_showCarrot = true;
     bool m_showLookahead = true;
     QTimer* m_playTimer = nullptr;
+    // 60 FPS 平滑渲染插值状态（仅用于直播跟随与自动播放，单步/拖拽立即精确定位）
+    QTimer* m_animTimer = nullptr;
+    bool m_animInit = false;
+    double m_dispX = 0.0, m_dispY = 0.0, m_dispYaw = 0.0, m_dispLa = -1.0;
+    QPointF m_dispCarrot;
+    bool m_dispHasCarrot = false;
+    double m_tgtX = 0.0, m_tgtY = 0.0, m_tgtYaw = 0.0, m_tgtLa = -1.0;
+    QPointF m_tgtCarrot;
+    bool m_tgtHasCarrot = false;
 
     // 控件
     QLineEdit* m_editUrl = nullptr;
