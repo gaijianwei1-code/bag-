@@ -12,6 +12,8 @@
 #include <QPainter>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QComboBox>
+#include <QLabel>
 #include <QToolButton>
 #include <QFormLayout>
 #include <QVBoxLayout>
@@ -83,16 +85,36 @@ QRectF FovOverlayItem::boundingRect() const
 void FovOverlayItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*)
 {
     painter->setRenderHint(QPainter::Antialiasing, true);
-    for (const auto& e : m_entries) {
-        if (!e.sector.isEmpty()) {
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(e.sectorColor);
-            painter->drawPolygon(e.sector);
+    // 先画安全区（极淡不糊图），再画危险区与红点（置顶突出）
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool drawHit = (pass == 1);
+        for (const auto& e : m_entries) {
+            if (e.isHit != drawHit) continue;
+            if (!e.sector.isEmpty()) {
+                if (e.borderColor.alpha() > 0) {
+                    QPen bp(e.borderColor, drawHit ? 1.6 : 0.8);
+                    bp.setCosmetic(true);
+                    painter->setPen(bp);
+                } else {
+                    painter->setPen(Qt::NoPen);
+                }
+                painter->setBrush(e.sectorColor);
+                painter->drawPolygon(e.sector);
+            }
+            if (drawHit && !e.dots.isEmpty()) {
+                QPen dp(QColor(255, 255, 255, 220), 1.0);
+                dp.setCosmetic(true);
+                painter->setPen(dp);
+                painter->setBrush(QColor(235, 45, 45, 235));
+                for (const auto& d : e.dots)
+                    painter->drawEllipse(d, 3.0, 3.0);
+            }
+            if (drawHit && !e.label.isEmpty()) {
+                painter->setPen(QColor(200, 25, 25, 245));
+                painter->setFont(QFont("Sans Serif", 8, QFont::Bold));
+                painter->drawText(e.labelPos, e.label);
+            }
         }
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(e.sectorColor.darker(140)); // 命中红点（深色）
-        for (const auto& d : e.dots)
-            painter->drawEllipse(d, 3.0, 3.0);
     }
 }
 
@@ -175,10 +197,17 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
         s->setValue(val);
         return s;
     };
+    m_comboMode = new QComboBox;
+    m_comboMode->addItem(QObject::tr("实车矩形 (1.85×1.50m)"), true);
+    m_comboMode->addItem(QObject::tr("扇形视锥"), false);
+    m_comboMode->setCurrentIndex(m_rectMode ? 0 : 1);
+
     m_spinFront = mkSpin(0.2, 20.0, 0.5, m_front_dist);
     m_spinHalf  = mkSpin(1.0, 89.0, 5.0, m_half_angle_deg);
+    m_spinHalf->setEnabled(!m_rectMode);
     m_spinZmax  = mkSpin(0.0, 30.0, 0.5, m_zmax);
 
+    form->addRow(QObject::tr("检测模式"), m_comboMode);
     form->addRow(QObject::tr("前视距离 (m)"), m_spinFront);
     form->addRow(QObject::tr("视锥半角 (°)"), m_spinHalf);
     form->addRow(QObject::tr("高度过滤 zmax (m)"), m_spinZmax);
@@ -188,6 +217,17 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
     m_btnToggle->setCheckable(true);
     m_btnToggle->setChecked(m_enabled);
     form->addRow(m_btnToggle);
+
+    m_lblSummary = new QLabel(QObject::tr("未开启（打开 .pcd 后开启即可净空排雷）"));
+    m_lblSummary->setWordWrap(true);
+    m_lblSummary->setStyleSheet("color: #6b7280; font-size: 12px;");
+    form->addRow(m_lblSummary);
+
+    connect(m_comboMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        const bool rect = m_comboMode->itemData(idx).toBool();
+        setRectMode(rect);
+    });
 
     connect(m_spinFront, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &FovLayer::setFrontDist);
@@ -225,6 +265,13 @@ void FovLayer::setZmax(double v)
     emit zmaxChanged(v);   // mainwindow 拿去重投影 pcd，然后回调 setGrid + recalcAll
 }
 
+void FovLayer::setRectMode(bool on)
+{
+    m_rectMode = on;
+    if (m_spinHalf) m_spinHalf->setEnabled(!on);
+    if (m_enabled) scheduleRecalc();
+}
+
 void FovLayer::scheduleRecalc()
 {
     if (!m_enabled || m_recalculating) return;
@@ -258,64 +305,123 @@ void FovLayer::recalcAll()
     QVector<FovOverlayItem::Entry> entries;
     const double rad = m_half_angle_deg * M_PI / 180.0;
     int hits = 0;
+    int totalPts = 0;
+    double minHitDist = 1e18;
+
+    constexpr double kHalfL = 1.85 * 0.5;   // 实车半长 0.925m
+    constexpr double kHalfW = 1.50 * 0.5;   // 实车半宽 0.750m
 
     for (BPathItem* path : m_paths) {
         if (!path) continue;
-        // 防御：场景 clear() 后轨迹 item 已被 delete，指针悬垂。
-        // 判断依据：item 若仍存活且已加入场景，scene() 非空；未加入场景时也无法安全判断，
-        // 故要求 trackers 存活（mainwindow 在 clear 后会调 setPathList 刷新列表）。
         if (path->scene() != m_scene) continue;
         const int n = path->pointsNumber();
         for (int i = 0; i < n; ++i) {
             BPointItem* pt = path->getElement(i);
             if (!pt) continue;
+            ++totalPts;
             const QPointF pix = pt->getPoint();
             const qreal yaw = pt->yaw();
+            const double screenYaw = -yaw;
+            const double c = std::cos(screenYaw), s = std::sin(screenYaw);
+            const double invRes = (m_resolution > 0.0) ? (1.0 / m_resolution) : 1.0;
 
             FovOverlayItem::Entry e;
-            // 像素坐标视锥扇形（屏幕角 = -yaw）
-            QPolygonF sector;
-            sector << pix;
-            const qreal a0 = -yaw - rad, a1 = -yaw + rad;
-            const qreal reach = (m_resolution > 0) ? m_front_dist / m_resolution : m_front_dist;
-            for (int k = 0; k <= 16; ++k) {
-                const qreal a = a0 + (a1 - a0) * k / 16.0;
-                sector << pix + QPointF(reach * std::cos(a), reach * std::sin(a));
+            if (m_rectMode) {
+                // 实车矩形包络：车尾 -0.925m ~ 车头前沿 +0.925m + 前视距离，宽 1.50m
+                const double xMinPx = -kHalfL * invRes;
+                const double xMaxPx = (kHalfL + m_front_dist) * invRes;
+                const double hwPx   = kHalfW * invRes;
+                auto rot = [&](double lx, double ly) {
+                    return pix + QPointF(lx * c - ly * s, lx * s + ly * c);
+                };
+                QPolygonF box;
+                box << rot(xMinPx, -hwPx) << rot(xMaxPx, -hwPx)
+                    << rot(xMaxPx,  hwPx) << rot(xMinPx,  hwPx);
+                e.sector = box;
+                e.labelPos = rot(xMaxPx, -hwPx) + QPointF(4, -3);
+            } else {
+                // 传统扇形视锥
+                QPolygonF sector;
+                sector << pix;
+                const qreal a0 = screenYaw - rad, a1 = screenYaw + rad;
+                const qreal reach = m_front_dist * invRes;
+                for (int k = 0; k <= 16; ++k) {
+                    const qreal a = a0 + (a1 - a0) * k / 16.0;
+                    sector << pix + QPointF(reach * std::cos(a), reach * std::sin(a));
+                }
+                e.sector = sector;
+                e.labelPos = pix + QPointF(reach * c + 4, reach * s - 3);
             }
-            e.sector = sector;
 
             if (m_grid && m_grid->width > 0 && m_resolution > 0) {
-                // 像素 → 世界
                 const double wx = pix.x() * m_resolution + m_origin_x;
                 const double wy = (m_pgm_height - 1 - pix.y()) * m_resolution + m_origin_y;
 
-                blz::FovParams fp;
-                fp.front_dist = m_front_dist;
-                fp.half_angle = rad;
-                fp.hit_dist_max = std::max(m_front_dist, 3.0);
-                auto res = blz::cast_fov(*m_grid, wx, wy, yaw, fp);
+                blz::FovResult res;
+                if (m_rectMode) {
+                    blz::RectParams rp;
+                    rp.x_min = -kHalfL;
+                    rp.x_max = kHalfL + m_front_dist;
+                    rp.half_width = kHalfW;
+                    rp.max_hits = 48;
+                    res = blz::cast_rect(*m_grid, wx, wy, yaw, rp);
+                } else {
+                    blz::FovParams fp;
+                    fp.front_dist = m_front_dist;
+                    fp.half_angle = rad;
+                    fp.hit_dist_max = std::max(m_front_dist, 3.0);
+                    res = blz::cast_fov(*m_grid, wx, wy, yaw, fp);
+                }
 
                 if (res.hit) {
-                    e.sectorColor = QColor(30, 144, 255, 46);  // 命中：半透明蓝视锥
+                    e.isHit = true;
                     ++hits;
+                    if (res.first_hit_dist >= 0.0 && res.first_hit_dist < minHitDist)
+                        minHitDist = res.first_hit_dist;
+                    if (m_rectMode) {
+                        e.sectorColor = QColor(239, 68, 68, 52);    // 危险红框
+                        e.borderColor = QColor(220, 38, 38, 210);
+                        // 仅每间隔若干点或最近点标距离，避免文字重叠
+                        if (res.first_hit_dist >= 0.0 && (i % 3 == 0 || hits <= 5))
+                            e.label = QStringLiteral("%1m").arg(res.first_hit_dist, 0, 'f', 2);
+                    } else {
+                        e.sectorColor = QColor(30, 144, 255, 46);
+                        e.borderColor = QColor(0, 0, 0, 0);
+                    }
                     for (const auto& h : res.hits) {
-                        // 命中点世界 → 像素
                         const double hx = (h.x - m_origin_x) / m_resolution;
                         const double hy = m_pgm_height - 1 - (h.y - m_origin_y) / m_resolution;
                         e.dots << QPointF(hx, hy);
                     }
                 } else {
-                    e.sectorColor = QColor(200, 200, 200, 26); // 无命中淡灰
+                    // 安全点：矩形模式下几乎透明，绝不糊画面
+                    e.sectorColor = m_rectMode ? QColor(34, 197, 94, 8) : QColor(200, 200, 200, 26);
+                    e.borderColor = QColor(0, 0, 0, 0);
                 }
             } else {
-                e.sectorColor = QColor(200, 200, 200, 26);     // 无 pcd：淡灰占位
+                e.sectorColor = m_rectMode ? QColor(156, 163, 175, 16) : QColor(200, 200, 200, 26);
+                e.borderColor = QColor(0, 0, 0, 0);
             }
             entries.push_back(e);
         }
     }
 
-    if (m_overlay) m_overlay->setEntries(entries);
+    if (m_overlayGuard) m_overlayGuard->setEntries(entries);
     m_lastHitCount = hits;
+    if (m_lblSummary) {
+        if (!m_grid || m_grid->width <= 0) {
+            m_lblSummary->setText(QObject::tr("尚未加载 .pcd 点云（仅显示检测框轮廓）"));
+            m_lblSummary->setStyleSheet("color: #b45309; font-size: 12px;");
+        } else if (hits > 0) {
+            m_lblSummary->setText(QObject::tr("危险点：%1 / %2（最近命中 %3m）")
+                                      .arg(hits).arg(totalPts)
+                                      .arg(minHitDist < 1e17 ? minHitDist : 0.0, 0, 'f', 2));
+            m_lblSummary->setStyleSheet("color: #dc2626; font-weight: bold; font-size: 12px;");
+        } else {
+            m_lblSummary->setText(QObject::tr("全线 %1 个轨迹点净空安全（0 命中）").arg(totalPts));
+            m_lblSummary->setStyleSheet("color: #15803d; font-weight: bold; font-size: 12px;");
+        }
+    }
     m_recalculating = false;
     emit recalculated(hits);
 }

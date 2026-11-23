@@ -91,6 +91,7 @@ MainWindow::MainWindow(QWidget *parent)
                 fovGrid = std::make_unique<blz::GridProjection>(
                     blz::project_to_grid(*fovCloud, 0.4, 0.05, v));
                 fovLayer->setGrid(fovGrid.get());
+                if (liveLayer) liveLayer->setGrid(fovGrid.get());
             }
             if (fovLayer->enabled()) fovLayer->recalcAll();
         });
@@ -657,6 +658,7 @@ void MainWindow::cleanImage()
     //必须先清空轨迹指针列表，再让图层重建，否则图层会访问悬垂指针
     if (liveLayer) {
         liveLayer->stopLive();          // 场景即将 clear，先断开直播避免写悬垂
+        liveLayer->setGrid(nullptr);
     }
     if (fovLayer) {
         fovLayer->setPathList(QList<BPathItem*>());   // 清悬垂轨迹指针（先于重建）
@@ -1373,6 +1375,7 @@ void MainWindow::on_doOpenPcd_triggered()
             blz::project_to_grid(*fovCloud, 0.4, 0.05, fovLayer->zmax()));
 
         fovLayer->setGrid(fovGrid.get());
+        if (liveLayer) liveLayer->setGrid(fovGrid.get());
         if (fovLayer->enabled())
             fovLayer->recalcAll();
 

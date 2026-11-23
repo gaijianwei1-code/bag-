@@ -80,6 +80,26 @@ int main(int argc, char** argv) {
         CHECK(cast_us < 1000.0, "raycast < 1 ms/cast");
     }
 
+    // ---- 8. 实车矩形包络/前视框 cast_rect 单元测试 ----
+    {
+        std::vector<Vec3> rpts = {
+            {2.0f, 0.2f, 0.5f},   // 车头前方矩形内（应命中）
+            {2.0f, 1.8f, 0.5f},   // 车身侧方矩形外（不应命中）
+            {-2.0f, 0.0f, 0.5f},  // 车后方（不应命中）
+        };
+        auto gr = project_to_grid(rpts, 0.2, 0.05, 2.0);
+        RectParams rp;
+        rp.x_min = 0.925; rp.x_max = 2.925; rp.half_width = 0.75;
+        auto rr = cast_rect(gr, 0.0, 0.0, 0.0, rp);
+        CHECK(rr.hit, "cast_rect hits front obstacle inside 1.50m corridor");
+        CHECK(rr.hits.size() == 1, "cast_rect ignores side/rear obstacles");
+        CHECK(rr.first_hit_dist >= 0.8 && rr.first_hit_dist <= 1.3, "cast_rect front distance accurate");
+
+        // 旋转 90° 朝 +y：前方 2.0m 的 (0, 2.0) 应命中，原 (2.0, 0.2) 不命中
+        auto rr90 = cast_rect(gr, 0.0, 0.0, 1.5707963, rp);
+        CHECK(!rr90.hit, "cast_rect rotated 90deg misses +x obstacle");
+    }
+
     if (g_fail == 0) { printf("\nSMOKE PASS\n"); return 0; }
     printf("\nSMOKE FAIL (%d)\n", g_fail);
     return 1;

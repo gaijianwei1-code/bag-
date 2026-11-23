@@ -51,4 +51,70 @@ FovResult cast_fov(const GridProjection& grid, double x, double y, double yaw,
     return r;
 }
 
+FovResult cast_rect(const GridProjection& grid, double x, double y, double yaw,
+                    const RectParams& p) {
+    FovResult r;
+    if (grid.width <= 0 || grid.height <= 0 || grid.resolution <= 0.0) return r;
+    if (p.x_max <= p.x_min || p.half_width <= 0.0) return r;
+
+    const double c = std::cos(yaw), s = std::sin(yaw);
+    // 计算旋转矩形 4 个角点的世界坐标 AABB
+    const double xs[4] = {p.x_min, p.x_max, p.x_max, p.x_min};
+    const double ys[4] = {-p.half_width, -p.half_width, p.half_width, p.half_width};
+    double wx_min = 1e18, wx_max = -1e18, wy_min = 1e18, wy_max = -1e18;
+    for (int i = 0; i < 4; ++i) {
+        const double wx = x + xs[i] * c - ys[i] * s;
+        const double wy = y + xs[i] * s + ys[i] * c;
+        if (wx < wx_min) wx_min = wx;
+        if (wx > wx_max) wx_max = wx;
+        if (wy < wy_min) wy_min = wy;
+        if (wy > wy_max) wy_max = wy;
+    }
+
+    const double res = grid.resolution;
+    const int cx0 = std::max(0, static_cast<int>(std::floor((wx_min - grid.min_x) / res)));
+    const int cx1 = std::min(grid.width - 1, static_cast<int>(std::floor((wx_max - grid.min_x) / res)));
+    const int cy0 = std::max(0, static_cast<int>(std::floor((wy_min - grid.min_y) / res)));
+    const int cy1 = std::min(grid.height - 1, static_cast<int>(std::floor((wy_max - grid.min_y) / res)));
+    if (cx0 > cx1 || cy0 > cy1) return r;
+
+    struct HitCand {
+        double dist;
+        float wx, wy;
+    };
+    std::vector<HitCand> cands;
+    const double half_cell = res * 0.5;
+    for (int cy = cy0; cy <= cy1; ++cy) {
+        const double wy = grid.min_y + (cy + 0.5) * res;
+        const size_t row = static_cast<size_t>(cy) * grid.width;
+        for (int cx = cx0; cx <= cx1; ++cx) {
+            if (!grid.occupied[row + cx]) continue;
+            const double wx = grid.min_x + (cx + 0.5) * res;
+            const double dx = wx - x, dy = wy - y;
+            // 反变换到车体局部坐标系
+            const double lx =  dx * c + dy * s;
+            const double ly = -dx * s + dy * c;
+            if (lx + half_cell < p.x_min || lx - half_cell > p.x_max) continue;
+            if (std::fabs(ly) - half_cell > p.half_width) continue;
+            const double d = std::max(0.0, lx - p.x_min);
+            cands.push_back({d, static_cast<float>(wx), static_cast<float>(wy)});
+        }
+    }
+
+    if (cands.empty()) {
+        r.free_dist = p.x_max - p.x_min;
+        return r;
+    }
+    std::sort(cands.begin(), cands.end(), [](const HitCand& a, const HitCand& b) {
+        return a.dist < b.dist;
+    });
+    r.hit = true;
+    r.first_hit_dist = cands.front().dist;
+    const int lim = std::min(static_cast<int>(cands.size()), std::max(1, p.max_hits));
+    r.hits.reserve(lim);
+    for (int i = 0; i < lim; ++i)
+        r.hits.push_back({cands[i].wx, cands[i].wy, 0.f});
+    return r;
+}
+
 } // namespace blz

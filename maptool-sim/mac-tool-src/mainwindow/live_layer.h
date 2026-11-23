@@ -28,6 +28,8 @@ class QCheckBox;
 class QSlider;
 class QTimer;
 
+namespace blz { struct GridProjection; }
+
 // ---------- 单帧时间轴数据结构（T3.3 边收边存与逐帧回放） ----------
 struct LiveFrame {
     double t = 0.0;
@@ -106,6 +108,8 @@ public:
     void attachScene(BQGraphicsScene* scene);
     // 地图参数（同 FovLayer 语义）：像素 ↔ 世界
     void setMapInfo(double resolution, double originX, double originY, int pgmHeight);
+    // 绑定本地 .pcd 占据网格（不持有所有权），用于直播/回放时实时检测车头前视红框内的点云命中
+    void setGrid(const blz::GridProjection* grid);
     QDockWidget* createControlDock(QMainWindow* win);
 
     // 连接/断开
@@ -157,6 +161,7 @@ private:
     QPointF worldToPixel(double wx, double wy) const;
 
     BQGraphicsScene* m_scene = nullptr;
+    const blz::GridProjection* m_grid = nullptr;
     LiveOverlayItem* m_overlay = nullptr;
     QPointer<LiveOverlayItem> m_overlayGuard;
 

@@ -32,6 +32,8 @@
 #include <QFileInfo>
 
 #include "../items/GraphicsType.h"
+#include "../../core/grid_projection.h"
+#include "../../core/fov_raycast.h"
 
 namespace {
 void uncheckQuietly(QPushButton* btn)
@@ -329,6 +331,14 @@ void LiveLayer::setMapInfo(double resolution, double originX, double originY, in
     // 必须用 m_overlayGuard 判活：openYaml() 调用前 scene->clear() 可能已析构旧图元
     if (m_overlayGuard && m_resolution > 0.0)
         m_overlayGuard->setVehicleSize(1.85 / m_resolution, 1.50 / m_resolution);
+}
+
+void LiveLayer::setGrid(const blz::GridProjection* grid)
+{
+    m_grid = grid;
+    // 若当前已有停留帧，立即重绘刷新本地 PCD 命中点
+    if (m_currentFrame >= 0 && m_currentFrame < m_timeline.size())
+        seekToFrameInternal(m_currentFrame, /*animate=*/false);
 }
 
 void LiveLayer::destroyOverlay()
@@ -922,13 +932,36 @@ void LiveLayer::seekToFrameInternal(int index, bool animate)
     m_tgtHasCarrot = f.hasCarrot;
     m_tgtCarrot = f.carrotWorld;
 
+    QVector<QPointF> frameHitsWorld = f.hitsWorld;
+    double frameFirstHitDist = f.firstHitDist;
+    bool fromPcd = false;
+
+    // 直播点云命中：若后端该帧无实时命中，且本地已加载 .pcd 占据网格，
+    // 用车头前沿红色前视框 [0.925, 0.925 + max(LA, 1.5)] × [-0.75, +0.75] 实时扫描 PCD 障碍点
+    if (frameHitsWorld.isEmpty() && m_grid && m_grid->width > 0) {
+        blz::RectParams rp;
+        rp.x_min = 1.85 * 0.5;   // 车头前沿 0.925m
+        const double reach = (f.lookahead > 0.0) ? std::max(f.lookahead, 1.0) : 1.5;
+        rp.x_max = rp.x_min + reach;
+        rp.half_width = 1.50 * 0.5;
+        rp.max_hits = 48;
+        const auto res = blz::cast_rect(*m_grid, f.x, f.y, f.yaw, rp);
+        if (res.hit) {
+            fromPcd = true;
+            frameFirstHitDist = res.first_hit_dist;
+            frameHitsWorld.reserve(static_cast<int>(res.hits.size()));
+            for (const auto& h : res.hits)
+                frameHitsWorld << QPointF(h.x, h.y);
+        }
+    }
+
     if (m_overlayGuard) {
         if (m_recordedPath.size() >= index + 1)
             m_overlayGuard->setLivePath(m_recordedPath.mid(0, index + 1));
 
         QVector<QPointF> pixHits;
-        pixHits.reserve(f.hitsWorld.size());
-        for (const auto& wh : f.hitsWorld) pixHits << worldToPixel(wh.x(), wh.y());
+        pixHits.reserve(frameHitsWorld.size());
+        for (const auto& wh : frameHitsWorld) pixHits << worldToPixel(wh.x(), wh.y());
         m_overlayGuard->setHits(pixHits);
     }
 
@@ -961,9 +994,10 @@ void LiveLayer::seekToFrameInternal(int index, bool animate)
         const QString carStr = f.hasCarrot
             ? QStringLiteral("(%1, %2)").arg(f.carrotWorld.x(), 0, 'f', 2).arg(f.carrotWorld.y(), 0, 'f', 2)
             : QStringLiteral("-");
-        const QString hitStr = (f.firstHitDist >= 0.0)
-            ? QStringLiteral("%1个(首%2m)").arg(f.hitsWorld.size()).arg(f.firstHitDist, 0, 'f', 2)
-            : QString::number(f.hitsWorld.size());
+        const QString hitTag = fromPcd ? QStringLiteral("PCD ") : QString();
+        const QString hitStr = (frameFirstHitDist >= 0.0)
+            ? QStringLiteral("%1%2个(首%3m)").arg(hitTag).arg(frameHitsWorld.size()).arg(frameFirstHitDist, 0, 'f', 2)
+            : QString::number(frameHitsWorld.size());
         m_lblAttr->setText(QStringLiteral("速度: %1 m/s | LA: %2\nCarrot: %3 | 命中: %4")
                                .arg(f.speed, 0, 'f', 2)
                                .arg(laStr, carStr, hitStr));

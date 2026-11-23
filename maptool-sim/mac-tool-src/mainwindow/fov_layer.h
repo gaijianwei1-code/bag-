@@ -19,6 +19,8 @@ class BQGraphicsScene;
 class BPathItem;
 class QDockWidget;
 class QDoubleSpinBox;
+class QComboBox;
+class QLabel;
 class QToolButton;
 class QMainWindow;
 class QTimer;
@@ -33,8 +35,12 @@ class FovOverlayItem : public QGraphicsObject
     Q_OBJECT
 public:
     struct Entry {
-        QPolygonF sector;        // 像素坐标视锥扇形（含顶点）
+        QPolygonF sector;        // 像素坐标检测区（实车矩形或视锥扇形）
         QColor sectorColor;
+        QColor borderColor;      // 危险点边框色（透明表示无边框）
+        QString label;           // 危险点距离标注（如 "0.35m"）
+        QPointF labelPos;
+        bool isHit = false;
         QVector<QPointF> dots;   // 命中点（像素坐标）
     };
 
@@ -88,6 +94,7 @@ public slots:
     void setFrontDist(double v);
     void setHalfAngleDeg(double v);
     void setZmax(double v);     // 仅存值 + 发 zmaxChanged（重投影由 mainwindow 做）
+    void setRectMode(bool on);  // true=实车1.85×1.50m矩形检测，false=旧版扇形视锥
 
 signals:
     void recalculated(int hitCount);   // 重算完成（冒烟断言用）
@@ -111,6 +118,7 @@ private:
     double m_front_dist = 2.0;
     double m_half_angle_deg = 30.0;
     double m_zmax = 2.0;
+    bool m_rectMode = true;     // 默认实车矩形净空检测（1.85×1.50m + 前视框）
     bool m_enabled = false;
     int m_lastHitCount = 0;
 
@@ -123,10 +131,12 @@ private:
     bool m_recalculating = false;
 
     // 控制面板控件（dock 持有所有权）
+    QComboBox* m_comboMode = nullptr;
     QDoubleSpinBox* m_spinFront = nullptr;
     QDoubleSpinBox* m_spinHalf = nullptr;
     QDoubleSpinBox* m_spinZmax = nullptr;
     QToolButton* m_btnToggle = nullptr;
+    QLabel* m_lblSummary = nullptr;
 };
 
 #endif // FOV_LAYER_H
