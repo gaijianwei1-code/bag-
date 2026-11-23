@@ -156,7 +156,9 @@ void RegressionPanel::setupUi()
                                " font-weight: bold; padding: 8px 24px; }");
     m_btnCancel = new QPushButton(tr("停止当前 run"));
     m_btnRefresh = new QPushButton(tr("刷新"));
+    auto* btnNewVenue = new QPushButton(tr("+ 新建场地"));
     hBottom->addWidget(m_btnRefresh);
+    hBottom->addWidget(btnNewVenue);
     hBottom->addWidget(m_btnCancel);
     hBottom->addStretch();
     hBottom->addWidget(m_btnSubmit);
@@ -174,9 +176,8 @@ void RegressionPanel::setupUi()
         int row = m_tableParams->currentRow();
         if (row >= 0) m_tableParams->removeRow(row);
     });
-    connect(m_btnRefresh, &QPushButton::clicked, this, [this]() {
-        fetchBranches(); fetchVenues(); fetchRuns();
-    });
+    connect(m_btnRefresh, &QPushButton::clicked, this, &RegressionPanel::refreshAll);
+    connect(btnNewVenue, &QPushButton::clicked, this, &RegressionPanel::newVenueRequested);
     connect(m_btnLoadParams, &QPushButton::clicked,
             this, &RegressionPanel::loadSelectedRunParams);
     connect(m_chkRunnableOnly, &QCheckBox::toggled, this, [this](bool) {
@@ -260,6 +261,13 @@ void RegressionPanel::showError(const QString& msg)
 {
     m_lblStatus->setText(tr("错误：%1").arg(msg));
     m_lblStatus->setStyleSheet("color: red;");
+}
+
+void RegressionPanel::refreshAll()
+{
+    fetchBranches();
+    fetchVenues();
+    fetchRuns();
 }
 
 void RegressionPanel::setSegmentPicker(std::function<bool(int&, int&, int&)> picker)

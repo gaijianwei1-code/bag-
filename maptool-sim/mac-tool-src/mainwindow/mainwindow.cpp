@@ -211,6 +211,15 @@ MainWindow::MainWindow(QWidget *parent)
                     return out;
                 });
                 // 提交成功后自动展开直播面板并自动连接直播
+                connect(regressionPanel, &RegressionPanel::newVenueRequested, this, [this]() {
+                    VenueWizard wiz(QStringLiteral("http://127.0.0.1:9100"),
+                                    QStringLiteral("dev-token"), this);
+                    connect(&wiz, &VenueWizard::venueSaved, this, [this](const QString& vid) {
+                        if (regressionPanel) regressionPanel->refreshAll();
+                        ui->statusbar->showMessage(tr("新场地已保存：%1").arg(vid), 6000);
+                    });
+                    wiz.exec();
+                });
                 connect(regressionPanel, &RegressionPanel::runSubmitted,
                         this, [this](const QString& runId) {
                     if (auto* dock = findChild<QDockWidget*>("liveControlDock")) {
@@ -226,6 +235,24 @@ MainWindow::MainWindow(QWidget *parent)
             regressionPanel->syncSegmentFromMap(/*autoEnable=*/false);
             regressionPanel->show();
             regressionPanel->raise();
+        });
+    }
+
+    //===== T1.2 场地档案向导 =====
+    {
+        QAction* venueAct = new QAction(tr("新建场地向导"), this);
+        venueAct->setObjectName("doVenueWizard");
+        QList<QMenu*> menus4 = ui->menubar->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
+        if (!menus4.isEmpty()) menus4.first()->addAction(venueAct);
+        ui->toolBar_PathEdit->addAction(venueAct);
+        connect(venueAct, &QAction::triggered, this, [this]() {
+            VenueWizard wiz(QStringLiteral("http://127.0.0.1:9100"),
+                            QStringLiteral("dev-token"), this);
+            connect(&wiz, &VenueWizard::venueSaved, this, [this](const QString& vid) {
+                if (regressionPanel) regressionPanel->refreshAll();
+                ui->statusbar->showMessage(tr("新场地已保存：%1").arg(vid), 6000);
+            });
+            wiz.exec();
         });
     }
 

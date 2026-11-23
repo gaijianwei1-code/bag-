@@ -57,6 +57,7 @@
 #include "fov_layer.h"
 #include "live_layer.h"
 #include "regression_panel.h"
+#include "venue_wizard.h"
 
 #define WINDOW_TITLE "Map Tool"
 #define WINDOW_ERROR "Error - Map Tool"

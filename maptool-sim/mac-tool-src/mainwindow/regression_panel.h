@@ -58,6 +58,10 @@ public:
 signals:
     void runSubmitted(const QString& runId);
     void statusMessage(const QString& msg);
+    void newVenueRequested();
+
+public slots:
+    void refreshAll();
 
 private slots:
     void fetchBranches();

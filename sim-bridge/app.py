@@ -102,6 +102,32 @@ def venue_bags(vid: str, x_bridge_token: Optional[str] = Header(None)):
     return V.load_venue(path).get("bags", [])
 
 
+@app.get("/container/assets")
+def list_container_assets(x_bridge_token: Optional[str] = Header(None)):
+    """T1.2 场地档案向导辅助：扫描容器内可用的 map_dir / bag / pcd / trajectory 路径。"""
+    _auth(x_bridge_token)
+    import subprocess
+    container = os.environ.get("SIM_CONTAINER", "roboneo-sim")
+    ws = os.environ.get("SIM_WS_DIR", "/root/catkin_ws")
+    py = (
+        "import glob, json, os\n"
+        f"ws = {ws!r}\n"
+        "scenes = sorted([d for d in glob.glob(ws + '/scenes/*') if os.path.isdir(d)])\n"
+        "bags = sorted(set(glob.glob('/root/bags/**/*.bag', recursive=True) + glob.glob(ws + '/runs/*/*.bag')))[:30]\n"
+        "trajs = sorted(glob.glob(ws + '/scenes/*/*.json'))[:30]\n"
+        "worlds = sorted(glob.glob(ws + '/scenes/*/*.pcd'))[:30]\n"
+        "print(json.dumps({'map_dirs': scenes, 'bags': bags, 'trajectories': trajs, 'worlds': worlds}))\n"
+    )
+    try:
+        p = subprocess.run(["docker", "exec", container, "python3", "-c", py],
+                           capture_output=True, text=True, timeout=6)
+        if p.returncode == 0 and p.stdout.strip():
+            return json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001
+        pass
+    return {"map_dirs": [], "bags": [], "trajectories": [], "worlds": []}
+
+
 def _check(venue: dict) -> None:
     try:
         V.validate_venue(venue, DATA_DIR, check_files=False)  # bridge 侧文件可能不在本机
