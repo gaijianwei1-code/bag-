@@ -55,6 +55,8 @@ signals:
 private slots:
     void fetchBranches();
     void fetchVenues();
+    void fetchRuns();
+    void loadSelectedRunParams();
     void submitRun();
     void cancelActiveRun();
     void onNetworkFinished(QNetworkReply* reply);
@@ -75,9 +77,11 @@ private:
 
     QComboBox* m_comboBranch = nullptr;
     QComboBox* m_comboBag = nullptr;
+    QComboBox* m_comboHistoryRun = nullptr;
     QCheckBox* m_chkRunnableOnly = nullptr;
     QTableWidget* m_tableParams = nullptr;
     QSpinBox* m_spinDuration = nullptr;
+    QPushButton* m_btnLoadParams = nullptr;
     QPushButton* m_btnSubmit = nullptr;
     QPushButton* m_btnCancel = nullptr;
     QPushButton* m_btnRefresh = nullptr;

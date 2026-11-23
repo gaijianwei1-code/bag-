@@ -65,8 +65,8 @@ def build_replay_args(venue, req, run_id):
 
     baseline_ps = venue.get("default_param_set") or "baseline_branchB"
     candidate_ps = req.get("param_set") or baseline_ps
-    if req.get("param_overrides"):
-        candidate_ps = f".tmp_{run_id}"
+    if req.get("param_changes") or req.get("param_overrides"):
+        candidate_ps = f"ps_{run_id}"
 
     args = [
         "--mode", "closed",
@@ -84,37 +84,141 @@ def build_replay_args(venue, req, run_id):
     return args, baseline_ps, candidate_ps
 
 
-def _prepare_param_set_with_overrides(base_ps, tmp_ps, overrides):
-    """在容器内基于 base_ps 拷贝出 tmp_ps，并将 param_overrides 写入 YAML。"""
+def _prepare_param_set_with_overrides(base_ps, new_ps, overrides=None, changes=None):
+    """在容器内基于 base_ps 拷贝出合规参数集副本 new_ps，写入 param_set.yaml 的 changes 并用 sim_common/params 预校验。"""
     import shlex
     base_dir = f"{WS_IN_CONTAINER}/sim/param_sets/{base_ps}"
-    tmp_dir = f"{WS_IN_CONTAINER}/sim/param_sets/{tmp_ps}"
-    ov_json = json.dumps(overrides, ensure_ascii=False)
+    new_dir = f"{WS_IN_CONTAINER}/sim/param_sets/{new_ps}"
+
+    # 统一收集 changes（[{file, key, from, to}]）+ 兼容旧式 overrides（{key: val}）
+    incoming = []
+    seen_keys = set()
+    for ch in (changes or []):
+        if isinstance(ch, dict) and str(ch.get("key") or "").strip():
+            k = str(ch["key"]).strip()
+            incoming.append({
+                "file": str(ch.get("file") or "").strip(),
+                "key": k,
+                "from": ch.get("from"),
+                "to": ch.get("to"),
+            })
+            seen_keys.add(k)
+    for k, v in (overrides or {}).items():
+        ks = str(k).strip()
+        if ks and ks not in seen_keys:
+            incoming.append({"file": "", "key": ks, "from": None, "to": v})
+
+    inc_json = json.dumps(incoming, ensure_ascii=False)
+    intent_str = f"MapTool T4.3 参数集副本 ({new_ps})"
     py_script = (
-        "import json, os, shutil, yaml; "
-        f"src={base_dir!r}; dst={tmp_dir!r}; "
-        "shutil.rmtree(dst, ignore_errors=True); "
-        "shutil.copytree(src, dst); "
-        f"ov=json.loads({ov_json!r}); "
-        "yamls=[f for f in os.listdir(dst) if f.endswith('.yaml')]; "
-        "\nfor k, v in ov.items():\n"
-        "  written=False\n"
-        "  for fn in yamls:\n"
-        "    p=os.path.join(dst, fn)\n"
-        "    with open(p,'r',encoding='utf-8') as f: d=yaml.safe_load(f) or {}\n"
-        "    if isinstance(d, dict) and k in d:\n"
-        "      d[k]=v\n"
-        "      with open(p,'w',encoding='utf-8') as f: yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)\n"
-        "      written=True\n"
-        "  if not written:\n"
-        "    p=os.path.join(dst, 'schedule_goal.yaml')\n"
-        "    d={}\n"
-        "    if os.path.isfile(p):\n"
-        "      with open(p,'r',encoding='utf-8') as f: d=yaml.safe_load(f) or {}\n"
-        "    d[k]=v\n"
-        "    with open(p,'w',encoding='utf-8') as f: yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)\n"
+        "import json, os, shutil, sys, yaml\n"
+        f"ws_dir = {WS_IN_CONTAINER!r}\n"
+        f"src = {base_dir!r}; dst = {new_dir!r}\n"
+        f"base_ps = {base_ps!r}; new_ps = {new_ps!r}; intent_str = {intent_str!r}\n"
+        f"incoming = json.loads({inc_json!r})\n"
+        "shutil.rmtree(dst, ignore_errors=True)\n"
+        "shutil.copytree(src, dst)\n"
+        "snap_dir = os.path.join(dst, 'snapshot')\n"
+        "ps_path = os.path.join(dst, 'param_set.yaml')\n"
+        "if os.path.isfile(ps_path):\n"
+        "  with open(ps_path, 'r', encoding='utf-8') as f:\n"
+        "    ps_data = yaml.safe_load(f) or {}\n"
+        "else:\n"
+        "  ps_data = {'snapshot_dir': 'snapshot', 'changes': []}\n"
+        "ps_data['param_set_id'] = new_ps\n"
+        "ps_data['baseline'] = base_ps\n"
+        "ps_data['intent'] = intent_str\n"
+        "ps_data['snapshot_dir'] = ps_data.get('snapshot_dir') or 'snapshot'\n"
+        "def _lookup(mapping, dotted):\n"
+        "  cur = mapping\n"
+        "  for part in dotted.split('.'):\n"
+        "    if not isinstance(cur, dict) or part not in cur:\n"
+        "      return False, None\n"
+        "    cur = cur[part]\n"
+        "  return True, cur\n"
+        "def _coerce(val, ref):\n"
+        "  if not isinstance(val, str):\n"
+        "    return val\n"
+        "  s = val.strip()\n"
+        "  if isinstance(ref, bool):\n"
+        "    if s.lower() in ('true', '1', 'yes'): return True\n"
+        "    if s.lower() in ('false', '0', 'no'): return False\n"
+        "  elif isinstance(ref, (int, float)):\n"
+        "    try:\n"
+        "      if isinstance(ref, int) and '.' not in s and 'e' not in s.lower():\n"
+        "        return int(s)\n"
+        "      return float(s)\n"
+        "    except ValueError:\n"
+        "      pass\n"
+        "  return val\n"
+        "def _find_key(dotted):\n"
+        "  cands = []\n"
+        "  for dp, dns, fns in os.walk(snap_dir):\n"
+        "    dns.sort()\n"
+        "    for fn in sorted(fns):\n"
+        "      if fn.endswith(('.yaml', '.yml')):\n"
+        "        fp = os.path.join(dp, fn)\n"
+        "        with open(fp, 'r', encoding='utf-8') as f: d = yaml.safe_load(f) or {}\n"
+        "        ok, real_v = _lookup(d, dotted)\n"
+        "        if ok:\n"
+        "          cands.append((os.path.relpath(fp, snap_dir).replace('\\\\', '/'), real_v))\n"
+        "  if not cands:\n"
+        "    print(json.dumps({'error': 'PARAM_KEY_NOT_FOUND', 'detail': f'在 snapshot 中找不到参数: {dotted}'}, ensure_ascii=False))\n"
+        "    sys.exit(2)\n"
+        "  return cands[0]\n"
+        "merged = list(ps_data.get('changes') or [])\n"
+        "for item in incoming:\n"
+        "  f_rel = item['file'].strip().lstrip('/').replace('\\\\', '/')\n"
+        "  k = item['key']\n"
+        "  if not f_rel:\n"
+        "    f_rel, real_from = _find_key(k)\n"
+        "  else:\n"
+        "    fp = os.path.join(snap_dir, f_rel)\n"
+        "    if not os.path.isfile(fp):\n"
+        "      print(json.dumps({'error': 'PARAM_FILE_NOT_FOUND', 'detail': f'snapshot 中不存在文件: {f_rel}'}, ensure_ascii=False))\n"
+        "      sys.exit(2)\n"
+        "    with open(fp, 'r', encoding='utf-8') as f: d = yaml.safe_load(f) or {}\n"
+        "    ok, real_from = _lookup(d, k)\n"
+        "    if not ok:\n"
+        "      print(json.dumps({'error': 'PARAM_KEY_NOT_FOUND', 'detail': f'{f_rel} 中找不到参数: {k}'}, ensure_ascii=False))\n"
+        "      sys.exit(2)\n"
+        "  to_val = _coerce(item['to'], real_from)\n"
+        "  updated = False\n"
+        "  for cur in merged:\n"
+        "    if cur.get('file', '').replace('\\\\', '/') == f_rel and cur.get('key') == k:\n"
+        "      cur['from'] = real_from\n"
+        "      cur['to'] = to_val\n"
+        "      updated = True\n"
+        "      break\n"
+        "  if not updated:\n"
+        "    merged.append({'file': f_rel, 'key': k, 'from': real_from, 'to': to_val})\n"
+        "ps_data['changes'] = merged\n"
+        "with open(ps_path, 'w', encoding='utf-8') as f:\n"
+        "  yaml.safe_dump(ps_data, f, allow_unicode=True, sort_keys=False)\n"
+        "sys.path.insert(0, os.path.join(ws_dir, 'sim'))\n"
+        "from sim_common import params\n"
+        "ps = params.load_param_set(dst)\n"
+        "plan = params.resolve_changes(ps)\n"
+        "print(json.dumps({'param_set_id': new_ps, 'changes': ps['changes'], 'param_plan': plan}, ensure_ascii=False))\n"
     )
-    _exec(f"python3 -c {shlex.quote(py_script)}", timeout=30, check=True)
+    rc, out, err = _exec(f"python3 -c {shlex.quote(py_script)}", timeout=30, check=False)
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if rc != 0:
+        if lines:
+            try:
+                err_obj = json.loads(lines[-1])
+                if "error" in err_obj:
+                    raise RunError(err_obj["error"], err_obj.get("detail", ""))
+            except ValueError:
+                pass
+        raise RunError("CONTAINER_CMD_FAILED",
+                       f"param_set 准备失败 rc={rc}: {(err or out)[-400:]}")
+    if not lines:
+        return {"param_set_id": new_ps, "changes": incoming, "param_plan": []}
+    try:
+        return json.loads(lines[-1])
+    except ValueError:
+        return {"param_set_id": new_ps, "changes": incoming, "param_plan": []}
 
 
 def _cleanup_param_set(tmp_ps):
@@ -204,10 +308,13 @@ def submit(venue, req, run_id, on_status=None):
         status("queued", 0.25, "构建 bag_replay 参数")
         args, baseline_ps, candidate_ps = build_replay_args(venue, req, run_id)
         overrides = req.get("param_overrides") or {}
-        if overrides:
+        changes = req.get("param_changes") or []
+        param_meta = {"param_set_id": candidate_ps, "changes": [], "param_plan": []}
+        if changes or overrides:
             base_ps = req.get("param_set") or baseline_ps
             tmp_ps = candidate_ps
-            _prepare_param_set_with_overrides(base_ps, tmp_ps, overrides)
+            param_meta = _prepare_param_set_with_overrides(
+                base_ps, tmp_ps, overrides=overrides, changes=changes)
 
         status("replaying", 0.3, "启动 bag 回放闭环")
         # 分支快照同步进容器（只拷 src/sim 子树）
@@ -237,9 +344,13 @@ def submit(venue, req, run_id, on_status=None):
         return {"run_id": run_id, "init_pose": init_pose,
                 "commit": commit, "worktree": wt, "record": record,
                 "baseline_param_set": baseline_ps,
-                "candidate_param_set": candidate_ps}
+                "candidate_param_set": candidate_ps,
+                "param_set_id": param_meta.get("param_set_id") or candidate_ps,
+                "param_changes": param_meta.get("changes", []),
+                "param_plan": param_meta.get("param_plan", [])}
     finally:
-        if tmp_ps:
+        # ps_{run_id} 参数集副本持久化保留用于追溯对比；仅清理临时 .tmp_ 前缀目录
+        if tmp_ps and tmp_ps.startswith(".tmp_"):
             _cleanup_param_set(tmp_ps)
         cleanup_worktree(wt)
 

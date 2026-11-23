@@ -117,6 +117,7 @@ class RunRequest(BaseModel):
     commit: Optional[str] = None
     traj_json: dict
     param_overrides: dict = {}
+    param_changes: list[dict] = []
     segment: Optional[dict] = None   # {"from_t": float, "to_t": float} = L2 分段
     duration_s: Optional[float] = None   # 缺省用场地档案的 duration_s
     live: bool = True                # T2.3：是否起实时直播流
@@ -134,7 +135,10 @@ def submit_run(req: RunRequest, x_bridge_token: Optional[str] = Header(None)):
     venue = V.load_venue(vpath)
     if not V.bag_in_venue(venue, req.bag):
         raise HTTPException(422, f"bag 未在场地档案登记：{req.bag}")
-    if any(k.startswith("map") or k in ("init_pose",) for k in req.param_overrides):
+    forbidden_keys = list(req.param_overrides.keys()) + [
+        str(c.get("key") or "") for c in req.param_changes if isinstance(c, dict)
+    ]
+    if any(k.startswith("map") or k in ("init_pose",) for k in forbidden_keys):
         raise HTTPException(422, "地图与初始位姿由场地档案管理，不可覆盖")
     with _runs_lock:
         active = [r for r in _runs.values() if r["state"] in ("queued", "replaying", "analyzing")]
@@ -143,7 +147,8 @@ def submit_run(req: RunRequest, x_bridge_token: Optional[str] = Header(None)):
         run_id = f"{req.venue_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
         _runs[run_id] = {"state": "queued", "progress": 0.0, "frames": [],
                          "metrics": None, "req": req.model_dump(),
-                         "init_pose": None, "record": None, "error": None}
+                         "init_pose": None, "record": None, "error": None,
+                         "param_set_id": None, "param_changes": [], "param_plan": []}
 
     # T2.2：异步执行（首版单并发已在上面守卫）
     th = threading.Thread(target=_execute_run, args=(run_id, venue, req.model_dump()),
@@ -223,6 +228,10 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                 r["init_pose"] = result.get("init_pose")
                 r["record"] = result.get("record")
                 r["commit"] = result.get("commit")
+                r["baseline_param_set"] = result.get("baseline_param_set")
+                r["param_set_id"] = result.get("param_set_id")
+                r["param_changes"] = result.get("param_changes") or []
+                r["param_plan"] = result.get("param_plan") or []
                 rec = result.get("record") or {}
                 r["metrics"] = _record_to_metrics(rec)
                 r["state"] = "done"
@@ -303,6 +312,18 @@ def _persist_run(run_id: str) -> None:
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "run.json"), "w", encoding="utf-8") as f:
             json.dump(snap, f, ensure_ascii=False)
+        changes = snap.get("param_changes") or []
+        plan = snap.get("param_plan") or []
+        if changes or plan:
+            manifest = {
+                "run_id": run_id,
+                "param_set_id": snap.get("param_set_id"),
+                "baseline_param_set": snap.get("baseline_param_set"),
+                "changes": changes,
+                "param_plan": plan,
+            }
+            with open(os.path.join(d, "param_manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
     except OSError:
         pass
 
@@ -359,6 +380,43 @@ def cancel_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
     return {"run_id": run_id, "state": "failed"}
 
 
+@app.get("/runs")
+def list_runs(x_bridge_token: Optional[str] = Header(None)):
+    _auth(x_bridge_token)
+    merged: dict[str, dict] = {}
+    if os.path.isdir(RUNS_DIR):
+        for rid in os.listdir(RUNS_DIR):
+            p = os.path.join(RUNS_DIR, rid, "run.json")
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        merged[rid] = json.load(f)
+                except (OSError, ValueError):
+                    pass
+    with _runs_lock:
+        for rid, r in _runs.items():
+            merged[rid] = dict(r)
+
+    out = []
+    for rid in sorted(merged.keys(), reverse=True)[:30]:
+        r = merged[rid]
+        req = r.get("req") or {}
+        changes = r.get("param_changes") or req.get("param_changes") or []
+        cnt = len(changes) if changes else len(req.get("param_overrides") or {})
+        metrics = r.get("metrics") or {}
+        out.append({
+            "run_id": rid,
+            "state": r.get("state"),
+            "venue_id": req.get("venue_id"),
+            "branch": req.get("branch"),
+            "param_set_id": r.get("param_set_id"),
+            "param_changes_count": cnt,
+            "travel_m": metrics.get("travel_m"),
+            "msg": r.get("msg", ""),
+        })
+    return out
+
+
 @app.get("/runs/{run_id}")
 def get_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
     _auth(x_bridge_token)
@@ -368,7 +426,11 @@ def get_run(run_id: str, x_bridge_token: Optional[str] = Header(None)):
     return {"run_id": run_id, "state": run["state"], "progress": run["progress"],
             "metrics": run["metrics"], "init_pose": run.get("init_pose"),
             "commit": run.get("commit"), "error": run.get("error"),
-            "msg": run.get("msg", "")}
+            "msg": run.get("msg", ""),
+            "req": run.get("req"),
+            "param_set_id": run.get("param_set_id"),
+            "param_changes": run.get("param_changes"),
+            "param_plan": run.get("param_plan")}
 
 
 @app.get("/runs/{run_id}/timeline")

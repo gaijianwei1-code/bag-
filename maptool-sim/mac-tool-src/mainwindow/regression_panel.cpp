@@ -34,6 +34,7 @@ RegressionPanel::RegressionPanel(const QString& bridgeUrl, const QString& token,
     setupUi();
     fetchBranches();
     fetchVenues();
+    fetchRuns();
 }
 
 RegressionPanel::~RegressionPanel() = default;
@@ -62,9 +63,19 @@ void RegressionPanel::setupUi()
     formSel->addRow(tr("时长"), m_spinDuration);
     mainLayout->addWidget(grpSelect);
 
-    // 2. 参数表格
-    auto* grpParams = new QGroupBox(tr("参数覆盖（可选）"));
+    // 2. 参数表格 + T4.3 历史参数回填
+    auto* grpParams = new QGroupBox(tr("参数覆盖与回填（T4.3 副本）"));
     auto* vParams = new QVBoxLayout(grpParams);
+
+    auto* hHistory = new QHBoxLayout;
+    hHistory->addWidget(new QLabel(tr("历史 run：")));
+    m_comboHistoryRun = new QComboBox;
+    m_btnLoadParams = new QPushButton(tr("载回参数"));
+    m_btnLoadParams->setEnabled(false);
+    hHistory->addWidget(m_comboHistoryRun, 1);
+    hHistory->addWidget(m_btnLoadParams);
+    vParams->addLayout(hHistory);
+
     m_tableParams = new QTableWidget(0, 4);
     m_tableParams->setHorizontalHeaderLabels(
         {tr("文件"), tr("参数名"), tr("原值"), tr("新值")});
@@ -82,8 +93,11 @@ void RegressionPanel::setupUi()
     presetMenu->addAction(tr("next_goal_tolerance_increase (6 -> 1.0)"), this, [this]() {
         addParamRow("schedule_goal.yaml", "next_goal_tolerance_increase", "6", "1.0");
     });
-    presetMenu->addAction(tr("lookahead_distance (1.5 -> 2.0)"), this, [this]() {
-        addParamRow("schedule_goal.yaml", "lookahead_distance", "1.5", "2.0");
+    presetMenu->addAction(tr("PursuitLocalPlanner.lookahead_dist (1.5 -> 2.0)"), this, [this]() {
+        addParamRow("sweep_base/local_planner_params.yaml", "PursuitLocalPlanner.lookahead_dist", "1.5", "2.0");
+    });
+    presetMenu->addAction(tr("PursuitLocalPlanner.fast_linear_vel (0.5 -> 0.6)"), this, [this]() {
+        addParamRow("sweep_base/local_planner_params.yaml", "PursuitLocalPlanner.fast_linear_vel", "0.5", "0.6");
     });
     btnPreset->setMenu(presetMenu);
     auto* btnDelRow = new QPushButton(tr("- 删除选中"));
@@ -120,8 +134,10 @@ void RegressionPanel::setupUi()
         if (row >= 0) m_tableParams->removeRow(row);
     });
     connect(m_btnRefresh, &QPushButton::clicked, this, [this]() {
-        fetchBranches(); fetchVenues();
+        fetchBranches(); fetchVenues(); fetchRuns();
     });
+    connect(m_btnLoadParams, &QPushButton::clicked,
+            this, &RegressionPanel::loadSelectedRunParams);
     connect(m_chkRunnableOnly, &QCheckBox::toggled, this, [this](bool) {
         fetchVenues();
     });
@@ -211,6 +227,29 @@ void RegressionPanel::fetchVenues()
     m_nam->get(req);
 }
 
+void RegressionPanel::fetchRuns()
+{
+    QNetworkRequest req{QUrl(m_bridgeUrl + "/runs")};
+    req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    m_nam->get(req);
+}
+
+void RegressionPanel::loadSelectedRunParams()
+{
+    const QString rid = m_comboHistoryRun ? m_comboHistoryRun->currentData().toString() : QString();
+    if (rid.isEmpty()) {
+        showError(tr("请先选择一条有效的历史 run"));
+        return;
+    }
+    QNetworkRequest req{QUrl(m_bridgeUrl + "/runs/" + rid)};
+    req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    m_nam->get(req);
+    m_lblStatus->setText(tr("正在载入 %1 的参数…").arg(rid));
+    m_lblStatus->setStyleSheet("color: blue;");
+}
+
 void RegressionPanel::submitRun()
 {
     // 拦不可跑的场地：直接提示，不发请求（发了也是 0.1 秒后 failed，
@@ -229,13 +268,32 @@ void RegressionPanel::submitRun()
     body["traj_json"] = QJsonObject();
     body["duration_s"] = m_spinDuration->value();
 
-    // 参数覆盖
+    // 参数覆盖（T4.3 传完整 param_changes，同时保留 param_overrides 兼容）
+    auto parseJsonVal = [](const QString& s) -> QJsonValue {
+        const QString t = s.trimmed();
+        if (t.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0) return QJsonValue(true);
+        if (t.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0) return QJsonValue(false);
+        bool ok = false;
+        double d = t.toDouble(&ok);
+        if (ok) return QJsonValue(d);
+        return QJsonValue(t);
+    };
     QJsonObject overrides;
+    QJsonArray changesArr;
     for (const auto& r : paramChanges()) {
-        overrides[r.key] = r.toVal.toDouble();
+        const QJsonValue toVal = parseJsonVal(r.toVal);
+        overrides[r.key] = toVal;
+        QJsonObject ch;
+        ch["file"] = r.file.trimmed();
+        ch["key"] = r.key.trimmed();
+        ch["from"] = r.fromVal.trimmed();
+        ch["to"] = toVal;
+        changesArr.append(ch);
     }
     if (!overrides.isEmpty())
         body["param_overrides"] = overrides;
+    if (!changesArr.isEmpty())
+        body["param_changes"] = changesArr;
 
     QNetworkRequest req{QUrl(m_bridgeUrl + "/runs")};
     req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
@@ -362,13 +420,79 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
         m_lblStatus->setStyleSheet("color: green;");
         m_btnSubmit->setEnabled(true);
         updateSubmitState();
+        fetchRuns();
     }
-    else if (url.endsWith("/runs")) {
+    else if (url.endsWith("/runs") && reply->operation() == QNetworkAccessManager::GetOperation) {
+        m_comboHistoryRun->clear();
+        const QJsonArray arr = doc.array();
+        for (const auto& v : arr) {
+            const QJsonObject o = v.toObject();
+            const QString rid = o["run_id"].toString();
+            const QString st = o["state"].toString();
+            const int cnt = o["param_changes_count"].toInt();
+            m_comboHistoryRun->addItem(
+                QStringLiteral("%1 [%2 | %3改参]").arg(rid, st).arg(cnt), rid);
+        }
+        const bool hasRuns = (m_comboHistoryRun->count() > 0);
+        if (!hasRuns)
+            m_comboHistoryRun->addItem(tr("（暂无历史 run）"), QString());
+        if (m_btnLoadParams) m_btnLoadParams->setEnabled(hasRuns);
+    }
+    else if (url.endsWith("/runs") && reply->operation() == QNetworkAccessManager::PostOperation) {
         const QJsonObject o = doc.object();
         m_lastRunId = o["run_id"].toString();
         m_lblStatus->setText(tr("已提交 run_id=%1，正在自动连接直播…").arg(m_lastRunId));
         m_lblStatus->setStyleSheet("color: green;");
         emit runSubmitted(m_lastRunId);
         m_btnSubmit->setEnabled(true);
+        fetchRuns();
     }
+    else if (url.contains("/runs/")
+             && !url.endsWith("/timeline")
+             && !url.endsWith("/cancel")) {
+        const QJsonObject o = doc.object();
+        const QString rid = o["run_id"].toString();
+        const QJsonObject reqObj = o["req"].toObject();
+
+        // 同步分支与时长（方便直接基于历史 run 微调复跑）
+        const QString br = reqObj["branch"].toString();
+        if (!br.isEmpty()) {
+            int bi = m_comboBranch->findData(br);
+            if (bi >= 0) m_comboBranch->setCurrentIndex(bi);
+        }
+        const int dur = reqObj["duration_s"].toInt();
+        if (dur >= 10 && dur <= 600) m_spinDuration->setValue(dur);
+
+        auto valToStr = [](const QJsonValue& v) -> QString {
+            if (v.isBool()) return v.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+            if (v.isDouble()) return QString::number(v.toDouble());
+            if (v.isString()) return v.toString();
+            return QString();
+        };
+
+        m_tableParams->setRowCount(0);
+        int count = 0;
+        QJsonArray changes = o["param_changes"].toArray();
+        if (changes.isEmpty())
+            changes = reqObj["param_changes"].toArray();
+        if (!changes.isEmpty()) {
+            for (const auto& item : changes) {
+                const QJsonObject c = item.toObject();
+                const QString key = c["key"].toString();
+                if (key.isEmpty()) continue;
+                addParamRow(c["file"].toString(), key,
+                            valToStr(c["from"]), valToStr(c["to"]));
+                ++count;
+            }
+        } else {
+            const QJsonObject ov = reqObj["param_overrides"].toObject();
+            for (auto it = ov.begin(); it != ov.end(); ++it) {
+                addParamRow(QString(), it.key(), QStringLiteral("-"), valToStr(it.value()));
+                ++count;
+            }
+        }
+        m_lblStatus->setText(tr("已从 %1 载回 %2 项参数").arg(rid).arg(count));
+        m_lblStatus->setStyleSheet("color: green;");
+    }
+    reply->deleteLater();
 }

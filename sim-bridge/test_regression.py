@@ -91,13 +91,21 @@ def test_submit_without_param_overrides():
     assert cand == "baseline_branchB"
 
 
-def test_build_replay_args_with_param_overrides_uses_tmp_set():
-    """带 param_overrides 时 candidate 参数集切到 .tmp_{run_id}"""
+def test_build_replay_args_with_param_overrides_uses_ps_run_id():
+    """带 param_overrides 或 param_changes 时 candidate 参数集切到 ps_{run_id}"""
     args, base, cand = R.build_replay_args(
         _venue(), {"param_overrides": {"next_goal_tolerance_normal": 1.5}}, "run_xyz")
     assert base == "baseline_branchB"
-    assert cand == ".tmp_run_xyz"
-    assert ".tmp_run_xyz" in " ".join(args)
+    assert cand == "ps_run_xyz"
+    assert "ps_run_xyz" in " ".join(args)
+
+    args2, base2, cand2 = R.build_replay_args(
+        _venue(),
+        {"param_changes": [{"file": "schedule_goal.yaml", "key": "next_goal_tolerance_normal", "to": 1.2}]},
+        "run_abc")
+    assert base2 == "baseline_branchB"
+    assert cand2 == "ps_run_abc"
+    assert "ps_run_abc" in " ".join(args2)
 
 
 def test_cancel_active_and_persist(tmp_path, monkeypatch):
@@ -125,22 +133,87 @@ def test_cancel_active_and_persist(tmp_path, monkeypatch):
 
 
 def test_prepare_param_set_with_overrides_valid_python():
-    """参数覆盖脚本必须是合法 Python（不能用 shlex.quote 拼路径/JSON 导致 SyntaxError）"""
+    """参数覆盖脚本必须是合法 Python，写入 param_set.yaml 并用 sim_common.params 预校验"""
     import shlex
     from unittest.mock import patch
 
     captured = []
-    with patch.object(R, "_exec", side_effect=lambda cmd, **kw: captured.append(cmd) or ("", "", 0)):
-        R._prepare_param_set_with_overrides("t31_tol_1p0", ".tmp_test_1", {"lookahead_distance": 2.0})
+    with patch.object(R, "_exec", side_effect=lambda cmd, **kw: (captured.append(cmd) or (0, "", ""))):
+        res = R._prepare_param_set_with_overrides(
+            "t31_tol_1p0",
+            "ps_test_1",
+            overrides={"lookahead_dist": 2.0},
+            changes=[{
+                "file": "schedule_goal.yaml",
+                "key": "next_goal_tolerance_normal",
+                "from": 6,
+                "to": 1.5,
+            }],
+        )
 
+    assert res["param_set_id"] == "ps_test_1"
     assert len(captured) == 1
     parts = shlex.split(captured[0])
     assert parts[:2] == ["python3", "-c"]
     script = parts[2]
     # 能通过 compile 即无 SyntaxError
     compile(script, "<param_override>", "exec")
-    assert "src='/root/catkin_ws/sim/param_sets/t31_tol_1p0'" in script
-    assert "dst='/root/catkin_ws/sim/param_sets/.tmp_test_1'" in script
+    assert "src = '/root/catkin_ws/sim/param_sets/t31_tol_1p0'" in script
+    assert "dst = '/root/catkin_ws/sim/param_sets/ps_test_1'" in script
+    assert "param_set.yaml" in script
+    assert "params.load_param_set" in script
+
+
+def test_list_runs_and_get_run_param_backfill(tmp_path, monkeypatch):
+    """GET /runs 返回历史列表，GET /runs/{id} 应返回 param_set_id/param_changes/param_plan 以供回填"""
+    import json
+    from fastapi.testclient import TestClient
+    from unittest.mock import patch
+    import app as A
+
+    runs_dir = tmp_path / "runs"
+    d1 = runs_dir / "v_20261123_110000_aaaa"
+    d1.mkdir(parents=True)
+    changes_sample = [
+        {"file": "schedule_goal.yaml", "key": "next_goal_tolerance_normal", "from": 6, "to": 1.5},
+        {"file": "sweep_base/local_planner_params.yaml", "key": "PursuitLocalPlanner.lookahead_dist", "from": 1.5, "to": 2.0},
+    ]
+    plan_sample = [
+        {"file": "schedule_goal.yaml", "rosparam": "/schedule_goal_node/next_goal_tolerance_normal", "value": 1.5},
+        {"file": "sweep_base/local_planner_params.yaml", "rosparam": "/sweep_base/PursuitLocalPlanner/lookahead_dist", "value": 2.0},
+    ]
+    (d1 / "run.json").write_text(json.dumps({
+        "state": "done",
+        "progress": 1.0,
+        "frames": [],
+        "metrics": {"travel_m": 6.65},
+        "req": {"venue_id": "v", "branch": "main", "duration_s": 76, "param_changes": changes_sample},
+        "param_set_id": "ps_v_20261123_110000_aaaa",
+        "param_changes": changes_sample,
+        "param_plan": plan_sample,
+        "error": None,
+        "msg": "完成",
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(A, "RUNS_DIR", str(runs_dir))
+    monkeypatch.setattr(A, "_runs", {})
+    with patch.object(A, "TOKEN", "dev-token"):
+        client = TestClient(A.app)
+        lst = client.get("/runs", headers={"X-Bridge-Token": "dev-token"})
+        assert lst.status_code == 200
+        items = lst.json()
+        assert len(items) == 1
+        assert items[0]["run_id"] == "v_20261123_110000_aaaa"
+        assert items[0]["param_set_id"] == "ps_v_20261123_110000_aaaa"
+        assert items[0]["param_changes_count"] == 2
+        assert items[0]["travel_m"] == 6.65
+
+        detail = client.get("/runs/v_20261123_110000_aaaa", headers={"X-Bridge-Token": "dev-token"})
+        assert detail.status_code == 200
+        dj = detail.json()
+        assert dj["param_set_id"] == "ps_v_20261123_110000_aaaa"
+        assert len(dj["param_changes"]) == 2
+        assert dj["param_plan"][1]["rosparam"] == "/sweep_base/PursuitLocalPlanner/lookahead_dist"
 
 
 # ---------- 容器实测（默认跳过） ----------
