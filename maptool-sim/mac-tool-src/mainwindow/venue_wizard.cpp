@@ -344,8 +344,14 @@ void VenueWizard::parseYamlNearPgm(const QString& pgmPath)
                 m_spinRes->setValue(mRes.captured(1).toDouble());
                 yamlOk = true;
             }
-            QRegularExpression reOrg(R"(origin\s*:\s*\[\s*([0-9.\-eE]+)\s*,\s*([0-9.\-eE]+))");
-            auto mOrg = reOrg.match(content);
+            QRegularExpression reOrgInline(R"(origin\s*:\s*\[\s*([0-9.\-eE]+)\s*,\s*([0-9.\-eE]+))");
+            auto mOrg = reOrgInline.match(content);
+            if (!mOrg.hasMatch()) {
+                // 兼容多行 YAML 列表格式：origin:\n- -66.43\n- -86.40
+                QRegularExpression reOrgBlock(
+                    R"(origin\s*:\s*(?:\r?\n)\s*-\s*([0-9.\-eE]+)\s*(?:\r?\n)\s*-\s*([0-9.\-eE]+))");
+                mOrg = reOrgBlock.match(content);
+            }
             if (mOrg.hasMatch()) {
                 m_spinOriginX->setValue(mOrg.captured(1).toDouble());
                 m_spinOriginY->setValue(mOrg.captured(2).toDouble());

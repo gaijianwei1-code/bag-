@@ -194,15 +194,36 @@ MainWindow::MainWindow(QWidget *parent)
                         po["yaw"] = yaw;
                         po["pixel_x"] = pix.x();
                         po["pixel_y"] = pix.y();
-                        po["bypass"] = 1;
-                        po["road_id"] = 1;
-                        po["back"] = 0;
-                        po["clean_flag"] = 0;
-                        po["force_pass"] = 0;
-                        po["ignore_obstacles"] = 0;
-                        po["localization_mode"] = 0;
-                        po["reverse_traj"] = 0;
-                        po["turnAround"] = 0;
+                        if (auto* attr = pt->attr) {
+                            po["road_id"] = attr->road_id;
+                            po["road_width"] = attr->road_width;
+                            po["bypass"] = attr->bypass;
+                            po["seismic"] = attr->seismic;
+                            po["turnAround"] = attr->turnAround;
+                            po["trash"] = attr->trash;
+                            po["charge"] = attr->charge;
+                            po["back"] = attr->back;
+                            po["clean_flag"] = attr->clean_flag;
+                            po["parking_area"] = attr->parking_area;
+                            po["curve_paths"] = attr->curve_paths;
+                            po["ignore_obstacles"] = attr->ignore_obstacles;
+                            po["reverse_traj"] = attr->reverse_traj;
+                            for (const auto& pair : attr->self_define) {
+                                bool ok = false;
+                                int val = pair.second.toInt(&ok);
+                                po[pair.first] = ok ? QJsonValue(val) : QJsonValue(pair.second);
+                            }
+                        } else {
+                            po["bypass"] = 1;
+                            po["road_id"] = 1;
+                            po["back"] = 0;
+                            po["clean_flag"] = 0;
+                            po["force_pass"] = 0;
+                            po["ignore_obstacles"] = 0;
+                            po["localization_mode"] = 0;
+                            po["reverse_traj"] = 0;
+                            po["turnAround"] = 0;
+                        }
                         ptsArr.append(po);
                     }
                     if (ptsArr.size() < 2) return out;

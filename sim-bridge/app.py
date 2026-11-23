@@ -115,7 +115,18 @@ def _sync_venue_to_container(venue: dict) -> dict:
     c_bag = f"{bag_dir}/{os.path.basename(local_bag)}"
     _cp(pgm, c_pgm)
     if os.path.isfile(pgm_yaml):
-        _cp(pgm_yaml, f"{scene_dir}/{os.path.basename(pgm_yaml)}")
+        c_pgm_yaml = f"{scene_dir}/{os.path.basename(pgm_yaml)}"
+        _cp(pgm_yaml, c_pgm_yaml)
+        # 清洗 map.yaml 里的 image 字段（去掉 Windows/Mac 绝对路径，改为纯文件名，避免 map_server 找不到图崩溃）
+        fix_img_py = (
+            "import yaml\n"
+            f"p = {c_pgm_yaml!r}; bn = {os.path.basename(pgm)!r}\n"
+            "with open(p, 'r', encoding='utf-8') as f: d = yaml.safe_load(f) or {}\n"
+            "d['image'] = bn\n"
+            "with open(p, 'w', encoding='utf-8') as f: yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)\n"
+        )
+        subprocess.run(["docker", "exec", container, "python3", "-c", fix_img_py],
+                       check=True, capture_output=True, text=True, timeout=15)
     _cp(pcd, c_pcd)
     _cp(traj, c_traj)
     _cp(local_bag, c_bag)
