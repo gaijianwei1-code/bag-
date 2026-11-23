@@ -55,12 +55,14 @@ FovResult cast_rect(const GridProjection& grid, double x, double y, double yaw,
                     const RectParams& p) {
     FovResult r;
     if (grid.width <= 0 || grid.height <= 0 || grid.resolution <= 0.0) return r;
-    if (p.x_max <= p.x_min || p.half_width <= 0.0) return r;
+    const double y_lo = (p.y_min > -1e8) ? p.y_min : -p.half_width;
+    const double y_hi = (p.y_max > -1e8) ? p.y_max :  p.half_width;
+    if (p.x_max <= p.x_min || y_hi <= y_lo) return r;
 
     const double c = std::cos(yaw), s = std::sin(yaw);
     // 计算旋转矩形 4 个角点的世界坐标 AABB
     const double xs[4] = {p.x_min, p.x_max, p.x_max, p.x_min};
-    const double ys[4] = {-p.half_width, -p.half_width, p.half_width, p.half_width};
+    const double ys[4] = {y_lo,    y_lo,    y_hi,    y_hi};
     double wx_min = 1e18, wx_max = -1e18, wy_min = 1e18, wy_max = -1e18;
     for (int i = 0; i < 4; ++i) {
         const double wx = x + xs[i] * c - ys[i] * s;
@@ -91,11 +93,11 @@ FovResult cast_rect(const GridProjection& grid, double x, double y, double yaw,
             if (!grid.occupied[row + cx]) continue;
             const double wx = grid.min_x + (cx + 0.5) * res;
             const double dx = wx - x, dy = wy - y;
-            // 反变换到车体局部坐标系（严格限定在矩形框内，防止红点飘出框外）
+            // 反变换到车体局部坐标系（严格限定在非对称矩形框内，防止红点飘出框外）
             const double lx =  dx * c + dy * s;
             const double ly = -dx * s + dy * c;
             if (lx < p.x_min || lx > p.x_max) continue;
-            if (std::fabs(ly) > p.half_width) continue;
+            if (ly < y_lo || ly > y_hi) continue;
             const double d = std::max(0.0, lx - ref_x);
             cands.push_back({d, static_cast<float>(wx), static_cast<float>(wy)});
         }

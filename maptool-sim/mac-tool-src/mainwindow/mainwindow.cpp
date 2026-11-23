@@ -765,10 +765,12 @@ void MainWindow::cleanImage()
     if (fovLayer) {
         fovLayer->setPathList(QList<BPathItem*>());   // 清悬垂轨迹指针（先于重建）
         fovLayer->setGrid(nullptr);
+        fovLayer->setPgmGrid(nullptr);
         fovLayer->setMapInfo(0, 0, 0, 0);
         fovRefreshPaths();
     }
     fovGrid.reset();
+    pgmGrid.reset();
     fovCloud.reset();
 
     //控件设为不可用
@@ -1444,6 +1446,43 @@ QString MainWindow::getUserPath()
 
 //========== T1.5 前视命中区图层 ==========
 
+//把当前修过的 pgm 地图像素转为 2D 占据网格（灰度 < 128 视为障碍），毫秒级完成
+void MainWindow::rebuildPgmGrid()
+{
+    if (!pgmPixmapItem || resolution <= 0.0) {
+        pgmGrid.reset();
+        if (fovLayer) fovLayer->setPgmGrid(nullptr);
+        return;
+    }
+    const QImage gray = pgmPixmapItem->pixmap().toImage().convertToFormat(QImage::Format_Grayscale8);
+    const int w = gray.width(), h = gray.height();
+    if (w <= 0 || h <= 0) return;
+
+    auto g = std::make_unique<blz::GridProjection>();
+    g->resolution = resolution;
+    g->min_x = origin_x;
+    g->min_y = origin_y;
+    g->width = w;
+    g->height = h;
+    g->occupied.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
+    size_t occCount = 0;
+    for (int py = 0; py < h; ++py) {
+        const uchar* src = gray.constScanLine(py);
+        // 世界 y 向上：cy = h - 1 - py
+        uint8_t* dst = g->occupied.data() + static_cast<size_t>(h - 1 - py) * static_cast<size_t>(w);
+        for (int px = 0; px < w; ++px) {
+            if (src[px] < 128) {
+                dst[px] = 1;
+                ++occCount;
+            }
+        }
+    }
+    g->point_count = occCount;
+    pgmGrid = std::move(g);
+    if (fovLayer) fovLayer->setPgmGrid(pgmGrid.get());
+    if (liveLayer && !fovGrid) liveLayer->setGrid(pgmGrid.get());
+}
+
 //把当前轨迹集合同步给前视图层并触发重算
 void MainWindow::fovRefreshPaths()
 {
@@ -1685,11 +1724,13 @@ void MainWindow::openYaml(QString yamlPath)
     //T1.5:yaml 就绪 → 同步地图坐标参数给前视图层
     if (fovLayer && pgmPixmapItem) {
         fovLayer->setMapInfo(resolution, origin_x, origin_y, pgmPixmapItem->pixmap().height());
+        rebuildPgmGrid();
         fovRefreshPaths();
     }
     //T2.4:同样同步给直播层（像素↔世界换算）
     if (liveLayer && pgmPixmapItem) {
         liveLayer->setMapInfo(resolution, origin_x, origin_y, pgmPixmapItem->pixmap().height());
+        if (!fovGrid && pgmGrid) liveLayer->setGrid(pgmGrid.get());
     }
 }
 

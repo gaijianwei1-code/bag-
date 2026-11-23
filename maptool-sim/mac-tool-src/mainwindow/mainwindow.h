@@ -308,6 +308,8 @@ private:
     LiveLayer *liveLayer = nullptr;       // T2.4 直播跟车
     RegressionPanel *regressionPanel = nullptr;  // T4.1 回归面板
     std::unique_ptr<blz::GridProjection> fovGrid;   //pcd 投影占据网格缓存
+    std::unique_ptr<blz::GridProjection> pgmGrid;   //修过的 pgm 地图占据网格缓存
+    void rebuildPgmGrid();
     std::unique_ptr<std::vector<blz::Vec3>> fovCloud;   //原始点云缓存（zmax 重投影用）
     void fovRefreshPaths();     //把当前所有轨迹同步给 fovLayer 并触发重算
 };

@@ -73,10 +73,13 @@ public:
     explicit FovLayer(QObject* parent = nullptr);
     ~FovLayer() override;
 
+    enum ObstacleSource { SourcePgm = 0, SourcePcd = 1, SourcePgmAndPcd = 2 };
+
     // ---- 接线接口（mainwindow 调用）----
     void attachScene(BQGraphicsScene* scene);
     void setPathList(const QList<BPathItem*>& paths);   // 数据源（含当前编辑轨迹）
     void setGrid(const blz::GridProjection* grid);      // pcd 占据网格（不持有所有权）
+    void setPgmGrid(const blz::GridProjection* grid);   // 修过的 pgm 占据网格（不持有所有权）
     void setMapInfo(double resolution, double origin_x, double origin_y, int pgm_height);
     QDockWidget* createControlDock(QMainWindow* win);
 
@@ -96,6 +99,7 @@ public slots:
     void setZmax(double v);     // 仅存值 + 发 zmaxChanged（重投影由 mainwindow 做）
     void setRectMode(bool on);  // true=实车1.85×1.50m矩形检测，false=旧版扇形视锥
     void setSafetyMargin(double v); // 实车矩形单侧安全裕度（对应 costmap 膨胀半径，默认 0.25m）
+    void setObstacleSource(int src); // 0=修过的地图(.pgm), 1=原始点云(.pcd), 2=PGM∩PCD交集
 
 signals:
     void recalculated(int hitCount);   // 重算完成（冒烟断言用）
@@ -109,6 +113,7 @@ private:
     BQGraphicsScene* m_scene = nullptr;
     QList<BPathItem*> m_paths;
     const blz::GridProjection* m_grid = nullptr;
+    const blz::GridProjection* m_pgmGrid = nullptr;
 
     // 地图参数（像素 ↔ 世界米，与 mainwindow yaml/json 语义一致）
     double m_resolution = 0;
@@ -120,6 +125,7 @@ private:
     double m_half_angle_deg = 30.0;
     double m_zmax = 2.0;
     double m_margin = 0.25;     // 实车矩形单侧安全裕度（对应 costmap 膨胀，默认 0.25m）
+    int m_obstacleSource = SourcePgm; // 默认优先用修过的地图 (.pgm)，无 pgm 时自动退回 .pcd
     bool m_rectMode = true;     // 默认实车矩形净空检测（1.85×1.50m + 前视框）
     bool m_enabled = false;
     int m_lastHitCount = 0;
@@ -133,6 +139,7 @@ private:
     bool m_recalculating = false;
 
     // 控制面板控件（dock 持有所有权）
+    QComboBox* m_comboSource = nullptr;
     QComboBox* m_comboMode = nullptr;
     QDoubleSpinBox* m_spinFront = nullptr;
     QDoubleSpinBox* m_spinMargin = nullptr;

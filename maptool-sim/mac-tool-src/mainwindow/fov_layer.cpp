@@ -173,6 +173,12 @@ void FovLayer::setGrid(const blz::GridProjection* grid)
     if (m_enabled) scheduleRecalc();
 }
 
+void FovLayer::setPgmGrid(const blz::GridProjection* grid)
+{
+    m_pgmGrid = grid;
+    if (m_enabled) scheduleRecalc();
+}
+
 void FovLayer::setMapInfo(double resolution, double origin_x, double origin_y, int pgm_height)
 {
     m_resolution = resolution;
@@ -197,6 +203,12 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
         s->setValue(val);
         return s;
     };
+    m_comboSource = new QComboBox;
+    m_comboSource->addItem(QObject::tr("修过的地图 (.pgm)"), SourcePgm);
+    m_comboSource->addItem(QObject::tr("原始点云 (.pcd)"), SourcePcd);
+    m_comboSource->addItem(QObject::tr("PGM ∩ PCD (交集)"), SourcePgmAndPcd);
+    m_comboSource->setCurrentIndex(m_obstacleSource);
+
     m_comboMode = new QComboBox;
     m_comboMode->addItem(QObject::tr("实车矩形 (1.85×1.50m)"), true);
     m_comboMode->addItem(QObject::tr("扇形视锥"), false);
@@ -209,6 +221,7 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
     m_spinHalf->setEnabled(!m_rectMode);
     m_spinZmax   = mkSpin(0.0, 30.0, 0.5, m_zmax);
 
+    form->addRow(QObject::tr("障碍源"), m_comboSource);
     form->addRow(QObject::tr("检测模式"), m_comboMode);
     form->addRow(QObject::tr("前视距离 (m)"), m_spinFront);
     form->addRow(QObject::tr("安全裕度 (m)"), m_spinMargin);
@@ -221,10 +234,15 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
     m_btnToggle->setChecked(m_enabled);
     form->addRow(m_btnToggle);
 
-    m_lblSummary = new QLabel(QObject::tr("未开启（打开 .pcd 后开启即可净空排雷）"));
+    m_lblSummary = new QLabel(QObject::tr("未开启（打开地图/.pcd 后开启即可净空排雷）"));
     m_lblSummary->setWordWrap(true);
     m_lblSummary->setStyleSheet("color: #6b7280; font-size: 12px;");
     form->addRow(m_lblSummary);
+
+    connect(m_comboSource, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        setObstacleSource(m_comboSource->itemData(idx).toInt());
+    });
 
     connect(m_comboMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
@@ -284,6 +302,12 @@ void FovLayer::setSafetyMargin(double v)
     if (m_enabled && m_rectMode) scheduleRecalc();
 }
 
+void FovLayer::setObstacleSource(int src)
+{
+    m_obstacleSource = src;
+    if (m_enabled) scheduleRecalc();
+}
+
 void FovLayer::scheduleRecalc()
 {
     if (!m_enabled || m_recalculating) return;
@@ -323,6 +347,25 @@ void FovLayer::recalcAll()
     constexpr double kHalfL = 1.85 * 0.5;   // 实车半长 0.925m
     constexpr double kHalfW = 1.50 * 0.5;   // 实车半宽 0.750m
 
+    // 选择生效的障碍网格：
+    // SourcePgm(默认): 优先用修过的 pgm 栅格，无 pgm 时自动退回 pcd（兼容纯 pcd 冒烟测试）
+    // SourcePcd: 仅用原始 pcd
+    // SourcePgmAndPcd: 先扫 pgm，再用 pcd 做交集过滤（若缺其一则退回可用者）
+    const blz::GridProjection* primaryGrid = nullptr;
+    const blz::GridProjection* intersectGrid = nullptr;
+    if (m_obstacleSource == SourcePgm) {
+        primaryGrid = (m_pgmGrid && m_pgmGrid->width > 0) ? m_pgmGrid : m_grid;
+    } else if (m_obstacleSource == SourcePcd) {
+        primaryGrid = m_grid;
+    } else {
+        if (m_pgmGrid && m_pgmGrid->width > 0 && m_grid && m_grid->width > 0) {
+            primaryGrid = m_pgmGrid;
+            intersectGrid = m_grid;
+        } else {
+            primaryGrid = (m_pgmGrid && m_pgmGrid->width > 0) ? m_pgmGrid : m_grid;
+        }
+    }
+
     for (BPathItem* path : m_paths) {
         if (!path) continue;
         if (path->scene() != m_scene) continue;
@@ -332,6 +375,28 @@ void FovLayer::recalcAll()
             if (!pt) continue;
             ++totalPts;
             const QPointF pix = pt->getPoint();
+            // 读取轨迹点属性：按左/右贴边、狭口强通、忽略障碍动态调整左右安全裕度
+            int roadId = 0;
+            bool forcePass = false;
+            bool ignoreObs = false;
+            if (auto* attr = pt->attr) {
+                roadId = attr->road_id;
+                ignoreObs = (attr->ignore_obstacles != 0);
+                auto it = attr->self_define.find(QStringLiteral("force_pass"));
+                if (it != attr->self_define.end() && it->second.toInt() != 0)
+                    forcePass = true;
+            }
+            double leftMargin = m_margin;
+            double rightMargin = m_margin;
+            if (forcePass) {
+                leftMargin = 0.0;
+                rightMargin = 0.0;
+            } else if (roadId == 1) {
+                rightMargin = 0.0;   // 右贴边：右侧贴边裁剪
+            } else if (roadId == 2) {
+                leftMargin = 0.0;    // 左贴边：左侧贴边裁剪
+            }
+
             // 实时按相邻轨迹点重算切线朝向（拖动轨迹点后红框立即随弯旋转）
             qreal yaw = pt->yaw();
             if (n >= 2) {
@@ -349,18 +414,19 @@ void FovLayer::recalcAll()
 
             FovOverlayItem::Entry e;
             if (m_rectMode) {
-                // 实车矩形包络：车尾(-0.925-margin) ~ 车头前沿(+0.925+前视距离)，半宽(0.75+margin)
-                const double xMinPx = -(kHalfL + m_margin) * invRes;
+                // 屏幕坐标系 y 向下：车体左侧(+y_world) 对应屏幕 -ly，右侧(-y_world) 对应屏幕 +ly
+                const double xMinPx = -(kHalfL + (forcePass ? 0.0 : m_margin)) * invRes;
                 const double xMaxPx = (kHalfL + m_front_dist) * invRes;
-                const double hwPx   = (kHalfW + m_margin) * invRes;
+                const double leftPx  = (kHalfW + leftMargin) * invRes;
+                const double rightPx = (kHalfW + rightMargin) * invRes;
                 auto rot = [&](double lx, double ly) {
                     return pix + QPointF(lx * c - ly * s, lx * s + ly * c);
                 };
                 QPolygonF box;
-                box << rot(xMinPx, -hwPx) << rot(xMaxPx, -hwPx)
-                    << rot(xMaxPx,  hwPx) << rot(xMinPx,  hwPx);
+                box << rot(xMinPx, -leftPx) << rot(xMaxPx, -leftPx)
+                    << rot(xMaxPx,  rightPx) << rot(xMinPx,  rightPx);
                 e.sector = box;
-                e.labelPos = rot(xMaxPx, -hwPx) + QPointF(4, -3);
+                e.labelPos = rot(xMaxPx, -leftPx) + QPointF(4, -3);
             } else {
                 // 传统扇形视锥
                 QPolygonF sector;
@@ -375,25 +441,49 @@ void FovLayer::recalcAll()
                 e.labelPos = pix + QPointF(reach * c + 4, reach * s - 3);
             }
 
-            if (m_grid && m_grid->width > 0 && m_resolution > 0) {
+            if (ignoreObs) {
+                // 忽略障碍点：淡灰显示，不触发红框报警
+                e.sectorColor = QColor(156, 163, 175, 16);
+                e.borderColor = QColor(0, 0, 0, 0);
+            } else if (primaryGrid && primaryGrid->width > 0 && m_resolution > 0) {
                 const double wx = pix.x() * m_resolution + m_origin_x;
                 const double wy = (m_pgm_height - 1 - pix.y()) * m_resolution + m_origin_y;
 
                 blz::FovResult res;
                 if (m_rectMode) {
                     blz::RectParams rp;
-                    rp.x_min = -(kHalfL + m_margin);
+                    rp.x_min = -(kHalfL + (forcePass ? 0.0 : m_margin));
                     rp.x_max = kHalfL + m_front_dist;
-                    rp.half_width = kHalfW + m_margin;
+                    rp.y_min = -(kHalfW + rightMargin);
+                    rp.y_max =  (kHalfW + leftMargin);
                     rp.max_hits = 48;
-                    rp.ref_x = kHalfL;   // 以车头前沿为 0 基准：车身/膨胀区内碰撞=0.0m，车头前方=前视净空
-                    res = blz::cast_rect(*m_grid, wx, wy, yaw, rp);
+                    rp.ref_x = kHalfL;
+                    res = blz::cast_rect(*primaryGrid, wx, wy, yaw, rp);
                 } else {
                     blz::FovParams fp;
                     fp.front_dist = m_front_dist;
                     fp.half_angle = rad;
                     fp.hit_dist_max = std::max(m_front_dist, 3.0);
-                    res = blz::cast_fov(*m_grid, wx, wy, yaw, fp);
+                    res = blz::cast_fov(*primaryGrid, wx, wy, yaw, fp);
+                }
+
+                // 若启用 PGM ∩ PCD 交集模式，仅保留同时在另一网格也占据的命中点
+                if (res.hit && intersectGrid) {
+                    std::vector<blz::Vec3> kept;
+                    kept.reserve(res.hits.size());
+                    const double cw = std::cos(yaw), sw = std::sin(yaw);
+                    double bestD = 1e18;
+                    for (const auto& h : res.hits) {
+                        if (intersectGrid->occupied_at(h.x, h.y)) {
+                            kept.push_back(h);
+                            const double lx = (h.x - wx) * cw + (h.y - wy) * sw;
+                            const double d = std::max(0.0, lx - kHalfL);
+                            if (d < bestD) bestD = d;
+                        }
+                    }
+                    res.hits = std::move(kept);
+                    res.hit = !res.hits.empty();
+                    res.first_hit_dist = res.hit ? bestD : -1.0;
                 }
 
                 if (res.hit) {
@@ -404,7 +494,6 @@ void FovLayer::recalcAll()
                     if (m_rectMode) {
                         e.sectorColor = QColor(239, 68, 68, 52);    // 危险红框
                         e.borderColor = QColor(220, 38, 38, 210);
-                        // 仅每间隔若干点或最近点标距离，避免文字重叠
                         if (res.first_hit_dist >= 0.0 && (i % 3 == 0 || hits <= 5)) {
                             e.label = (res.first_hit_dist <= 0.01)
                                 ? QObject::tr("车身擦碰!")
@@ -420,7 +509,6 @@ void FovLayer::recalcAll()
                         e.dots << QPointF(hx, hy);
                     }
                 } else {
-                    // 安全点：矩形模式下几乎透明，绝不糊画面
                     e.sectorColor = m_rectMode ? QColor(34, 197, 94, 8) : QColor(200, 200, 200, 26);
                     e.borderColor = QColor(0, 0, 0, 0);
                 }
@@ -435,8 +523,8 @@ void FovLayer::recalcAll()
     if (m_overlayGuard) m_overlayGuard->setEntries(entries);
     m_lastHitCount = hits;
     if (m_lblSummary) {
-        if (!m_grid || m_grid->width <= 0) {
-            m_lblSummary->setText(QObject::tr("尚未加载 .pcd 点云（仅显示检测框轮廓）"));
+        if (!primaryGrid || primaryGrid->width <= 0) {
+            m_lblSummary->setText(QObject::tr("尚未加载地图或 .pcd（仅显示检测框轮廓）"));
             m_lblSummary->setStyleSheet("color: #b45309; font-size: 12px;");
         } else if (hits > 0) {
             const QString distTxt = (minHitDist <= 0.01)
