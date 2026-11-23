@@ -3,6 +3,8 @@
 #include "live_layer.h"
 #include "../items/GraphicsType.h"
 #include <QApplication>
+#include <QDockWidget>
+#include <QPushButton>
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
 #include <QJsonDocument>
@@ -62,6 +64,22 @@ int main(int argc, char** argv) {
     layer->startLive("ws://127.0.0.1:1", "dummy_run", "tok");
     layer->stopLive();
     CHECK(layer->frameCount() >= 0, "stop 后帧数状态可读");
+
+    // ---- 7. 未加载地图调用 setRunIdAndConnect 时，按钮静默弹起且 error 不被 stopLive() 吞掉 ----
+    {
+        auto* layer2 = new LiveLayer;
+        QDockWidget* dock = layer2->createControlDock(nullptr);
+        auto* btn = dock ? dock->findChild<QPushButton*>() : nullptr;
+        CHECK(dock != nullptr && btn != nullptr, "createControlDock 应创建按钮");
+        layer2->setRunIdAndConnect("dummy_run");
+        CHECK(layer2->state() == "error",
+              "未加载地图 setRunIdAndConnect 后应保持 error（不被 idle 覆盖）");
+        CHECK(layer2->lastError().contains("未加载地图"),
+              "error 消息应包含「未加载地图」");
+        CHECK(btn && !btn->isChecked(), "失败后连接按钮应自动弹起");
+        delete dock;
+        delete layer2;
+    }
 
     delete layer;
     delete scene;

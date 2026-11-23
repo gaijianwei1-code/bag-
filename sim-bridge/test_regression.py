@@ -124,6 +124,25 @@ def test_cancel_active_and_persist(tmp_path, monkeypatch):
         assert g.json()["error"]["code"] == "CANCELLED"
 
 
+def test_prepare_param_set_with_overrides_valid_python():
+    """参数覆盖脚本必须是合法 Python（不能用 shlex.quote 拼路径/JSON 导致 SyntaxError）"""
+    import shlex
+    from unittest.mock import patch
+
+    captured = []
+    with patch.object(R, "_exec", side_effect=lambda cmd, **kw: captured.append(cmd) or ("", "", 0)):
+        R._prepare_param_set_with_overrides("t31_tol_1p0", ".tmp_test_1", {"lookahead_distance": 2.0})
+
+    assert len(captured) == 1
+    parts = shlex.split(captured[0])
+    assert parts[:2] == ["python3", "-c"]
+    script = parts[2]
+    # 能通过 compile 即无 SyntaxError
+    compile(script, "<param_override>", "exec")
+    assert "src='/root/catkin_ws/sim/param_sets/t31_tol_1p0'" in script
+    assert "dst='/root/catkin_ws/sim/param_sets/.tmp_test_1'" in script
+
+
 # ---------- 容器实测（默认跳过） ----------
 @pytest.mark.docker
 def test_list_branches_real():

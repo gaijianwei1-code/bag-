@@ -92,10 +92,10 @@ def _prepare_param_set_with_overrides(base_ps, tmp_ps, overrides):
     ov_json = json.dumps(overrides, ensure_ascii=False)
     py_script = (
         "import json, os, shutil, yaml; "
-        f"src={shlex.quote(base_dir)}; dst={shlex.quote(tmp_dir)}; "
+        f"src={base_dir!r}; dst={tmp_dir!r}; "
         "shutil.rmtree(dst, ignore_errors=True); "
         "shutil.copytree(src, dst); "
-        f"ov=json.loads({shlex.quote(ov_json)}); "
+        f"ov=json.loads({ov_json!r}); "
         "yamls=[f for f in os.listdir(dst) if f.endswith('.yaml')]; "
         "\nfor k, v in ov.items():\n"
         "  written=False\n"
@@ -124,7 +124,7 @@ def _cleanup_param_set(tmp_ps):
 
 def cancel_active_run():
     """中止容器内正在运行的回放与直播进程（用于单并发卡死恢复）。"""
-    _exec("pkill -f 'bag_replay|b_line_run|live_bridge|lookahead_observer' || true",
+    _exec("pkill -f '[b]ag_replay|[b]_line_run|[l]ive_bridge|[l]ookahead_observer' || true",
           timeout=15, check=False)
 
 

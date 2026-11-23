@@ -18,8 +18,19 @@
 #include <QJsonArray>
 #include <QUrl>
 #include <QtMath>
+#include <QSignalBlocker>
 
 #include "../items/GraphicsType.h"
+
+namespace {
+void uncheckQuietly(QPushButton* btn)
+{
+    if (btn && btn->isChecked()) {
+        QSignalBlocker blocker(btn);
+        btn->setChecked(false);
+    }
+}
+} // namespace
 
 // ================= LiveOverlayItem =================
 
@@ -294,14 +305,14 @@ void LiveLayer::startLive(const QString& baseUrl, const QString& runId, const QS
         m_lastError = QStringLiteral("地址或 run_id 为空");
         m_state = QStringLiteral("error");       // 不依赖 dock 回调，无 dock 时也要可读
         emit stateChanged(m_state, 0.0, m_lastError);
-        if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
+        uncheckQuietly(m_btnConnect);
         return;
     }
     if (m_resolution <= 0.0) {
         m_lastError = QStringLiteral("未加载地图（请先打开 .pgm 与 .yaml 文件后再连接直播）");
         m_state = QStringLiteral("error");
         emit stateChanged(m_state, 0.0, m_lastError);
-        if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
+        uncheckQuietly(m_btnConnect);
         return;
     }
     m_baseUrl = baseUrl;
@@ -365,14 +376,16 @@ void LiveLayer::onConnected()
 
 void LiveLayer::onDisconnected()
 {
-    // 已因 run 失败而断开时，保留真实失败原因，不要改成含糊的"连接断开"
+    // 已因 run 失败或已完成而断开时，保留真实状态与文案，不要改成含糊的"连接断开"
     if (m_state == QStringLiteral("failed") && !m_lastError.isEmpty()) {
         emit stateChanged(m_state, 0.0, m_lastError);
+    } else if (m_state == QStringLiteral("done")) {
+        // 已完成回放时保持 done 状态与指标显示，不覆盖文案
     } else {
         m_state = QStringLiteral("disconnected");
         emit stateChanged(m_state, 0.0, QStringLiteral("连接断开"));
     }
-    if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
+    uncheckQuietly(m_btnConnect);
 }
 
 void LiveLayer::onError(const QString& err)
@@ -414,8 +427,8 @@ void LiveLayer::onTextMessage(const QString& msg)
                                      : QStringLiteral("%1（%2）").arg(msg, code);
         m_state = QStringLiteral("failed");
         emit stateChanged(m_state, 0.0, m_lastError);
-        // 让按钮弹起来，用户能再次点击（否则看起来像卡死）
-        if (m_btnConnect && m_btnConnect->isChecked()) m_btnConnect->setChecked(false);
+        // 静默弹起按钮，防止触发 toggled(false) -> stopLive() 把真实失败原因盖成 "idle 已断开"
+        uncheckQuietly(m_btnConnect);
         return;
     }
 
