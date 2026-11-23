@@ -10,6 +10,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QFileInfo>
+#include <QFile>
 #include <cstdio>
 
 static int g_fail = 0;
@@ -79,6 +81,52 @@ int main(int argc, char** argv) {
         CHECK(btn && !btn->isChecked(), "失败后连接按钮应自动弹起");
         delete dock;
         delete layer2;
+    }
+
+    // ---- 8. T3.3 三层归因时间轴回放、单帧截图与完成指标保留 ----
+    {
+        auto* layer3 = new LiveLayer;
+        layer3->attachScene(scene);
+        layer3->setMapInfo(0.05, -22.796825, -77.406677, 1000);
+        QDockWidget* dock3 = layer3->createControlDock(nullptr);
+
+        layer3->onTextMessage(QStringLiteral(
+            R"({"type":"frame","t":0.2,"x":4.0,"y":-0.1,"yaw":0.0,"speed":0.3,"lookahead":1.5,"carrot":[5.5,-0.1],"front_hits":[[5.8,0.0]]})"));
+        layer3->onTextMessage(QStringLiteral(
+            R"({"type":"frame","t":0.4,"x":4.5,"y":-0.12,"yaw":0.02,"speed":0.38,"lookahead":1.75,"carrot":[6.2,-0.1],"front_hits":[[6.1,0.1],[6.3,-0.2]]})"));
+        layer3->onTextMessage(QStringLiteral(
+            R"({"type":"frame","t":0.6,"x":5.0,"y":-0.15,"yaw":0.04,"speed":0.41,"lookahead":1.9,"carrot":[6.8,-0.12],"front_hits":[]})"));
+
+        CHECK(layer3->timelineCount() == 3, "T3.3 应缓存 3 帧时间轴");
+        CHECK(layer3->currentFrameIndex() == 2, "默认跟随最新帧 (index=2)");
+
+        layer3->seekToFrame(1);
+        CHECK(layer3->currentFrameIndex() == 1, "seekToFrame(1) 后索引切到 1");
+        CHECK(layer3->overlayHasLookahead(), "seekToFrame(1) 后 overlay 渲染 Lookahead");
+        CHECK(layer3->overlayHasCarrot(), "seekToFrame(1) 后 overlay 渲染 Carrot");
+
+        const QString shotPath = QStringLiteral("/tmp/blz_t33_smoke_shot.png");
+        QFile::remove(shotPath);
+        const bool saved = layer3->exportFrameScreenshot(shotPath);
+        const QFileInfo shotInfo(shotPath);
+        CHECK(saved && shotInfo.exists() && shotInfo.size() > 0,
+              "exportFrameScreenshot 应导出非空 PNG 文件");
+
+        layer3->onTextMessage(QStringLiteral(
+            R"({"type":"metrics","travel_m":12.12,"path_length_m":25.63,"mean_speed":0.398,"edge_lateral_rms":0.0064,"cmd_nonzero":217,"cmd_count":217,"gates":"已移动"})"));
+        layer3->onTextMessage(QStringLiteral(
+            R"({"type":"status","state":"done","progress":1.0,"msg":"finished"})"));
+
+        CHECK(layer3->state() == "done", "metrics+done 后状态保持 done");
+        CHECK(layer3->metricsSummary().contains("12.12"),
+              "metricsSummary 应包含行程 12.12");
+        CHECK(layer3->stateLabelText().contains("12.12") &&
+              layer3->stateLabelText().contains("0.398"),
+              "状态标签应保留行程与均速，不被 finished 覆盖");
+
+        QFile::remove(shotPath);
+        delete dock3;
+        delete layer3;
     }
 
     delete layer;

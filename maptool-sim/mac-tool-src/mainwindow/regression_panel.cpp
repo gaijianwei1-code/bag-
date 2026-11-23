@@ -454,14 +454,12 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
         const QString rid = o["run_id"].toString();
         const QJsonObject reqObj = o["req"].toObject();
 
-        // 同步分支与时长（方便直接基于历史 run 微调复跑）
+        // 仅同步分支（保留当前时长设置，避免把用户设的 76s 意外改回短时长）
         const QString br = reqObj["branch"].toString();
         if (!br.isEmpty()) {
             int bi = m_comboBranch->findData(br);
             if (bi >= 0) m_comboBranch->setCurrentIndex(bi);
         }
-        const int dur = reqObj["duration_s"].toInt();
-        if (dur >= 10 && dur <= 600) m_spinDuration->setValue(dur);
 
         auto valToStr = [](const QJsonValue& v) -> QString {
             if (v.isBool()) return v.toBool() ? QStringLiteral("true") : QStringLiteral("false");

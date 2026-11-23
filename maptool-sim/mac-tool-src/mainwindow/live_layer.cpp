@@ -7,9 +7,14 @@
 #include <QDockWidget>
 #include <QFormLayout>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QCheckBox>
+#include <QSlider>
+#include <QTimer>
 #include <QMainWindow>
 #include <QWebSocket>
 #include <QDebug>
@@ -19,6 +24,12 @@
 #include <QUrl>
 #include <QtMath>
 #include <QSignalBlocker>
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QGraphicsView>
+#include <QImage>
+#include <QDir>
+#include <QFileInfo>
 
 #include "../items/GraphicsType.h"
 
@@ -54,6 +65,11 @@ QRectF LiveOverlayItem::contentRect() const
         has = true;
     };
     if (m_hasVehicle) add(QRectF(m_vehicle.x() - 20, m_vehicle.y() - 20, 40, 40));
+    if (m_hasVehicle && m_hasLookahead && m_lookaheadPx > 0.0) {
+        const QPointF tip = m_vehicle + QPointF(m_lookaheadPx * std::cos(m_yawPix),
+                                                m_lookaheadPx * std::sin(m_yawPix));
+        add(QRectF(tip.x() - 48, tip.y() - 24, 96, 48));
+    }
     if (m_hasCarrot) add(QRectF(m_carrot.x() - 8, m_carrot.y() - 8, 16, 16));
     for (const auto& p : m_truthPath) add(QRectF(p.x() - 2, p.y() - 2, 4, 4));
     for (const auto& p : m_livePath) add(QRectF(p.x() - 2, p.y() - 2, 4, 4));
@@ -109,11 +125,32 @@ void LiveOverlayItem::setCarrot(const QPointF& pix, bool valid)
     update();
 }
 
+void LiveOverlayItem::setLookahead(double distMeters, double distPixels, bool valid)
+{
+    prepareGeometryChange();
+    m_lookaheadM = distMeters;
+    m_lookaheadPx = distPixels;
+    m_hasLookahead = valid;
+    m_brect = contentRect();
+    update();
+}
+
+void LiveOverlayItem::setLayerVisibility(bool showHits, bool showCarrot, bool showLookahead)
+{
+    m_showHits = showHits;
+    m_showCarrot = showCarrot;
+    m_showLookahead = showLookahead;
+    update();
+}
+
 void LiveOverlayItem::clearAll()
 {
     prepareGeometryChange();
     m_hasVehicle = false;
     m_hasCarrot = false;
+    m_hasLookahead = false;
+    m_lookaheadM = 0.0;
+    m_lookaheadPx = 0.0;
     m_truthPath.clear();
     m_livePath.clear();
     m_hits.clear();
@@ -139,17 +176,25 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
         p->drawPolyline(m_livePath.constData(), m_livePath.size());
     }
 
-    // 3. 前视命中点（红点）
-    if (!m_hits.isEmpty()) {
-        p->setPen(Qt::NoPen);
-        p->setBrush(QColor(230, 40, 40, 220));
+    // 3. 三层归因 - 层 1：前视命中点（红点 + 浅色外圈）
+    if (m_showHits && !m_hits.isEmpty()) {
+        p->setPen(QPen(QColor(255, 255, 255, 210), 1.0));
+        p->setBrush(QColor(235, 45, 45, 230));
         for (const auto& h : m_hits)
-            p->drawEllipse(h, 3.0, 3.0);
+            p->drawEllipse(h, 3.5, 3.5);
     }
 
-    // 4. carrot 目标点（绿色十字）
-    if (m_hasCarrot) {
-        p->setPen(QPen(QColor(30, 180, 60, 240), 0.0));
+    // 4. 三层归因 - 层 2：carrot 目标点（绿十字圆标 + 到车虚线）
+    if (m_showCarrot && m_hasCarrot) {
+        if (m_hasVehicle) {
+            QPen linkPen(QColor(22, 163, 74, 180), 1.5, Qt::DashLine);
+            linkPen.setCosmetic(true);
+            p->setPen(linkPen);
+            p->drawLine(m_vehicle, m_carrot);
+        }
+        QPen cPen(QColor(22, 163, 74, 240), 1.8);
+        cPen.setCosmetic(true);
+        p->setPen(cPen);
         const double s = 6.0;
         p->drawLine(m_carrot + QPointF(-s, 0), m_carrot + QPointF(s, 0));
         p->drawLine(m_carrot + QPointF(0, -s), m_carrot + QPointF(0, s));
@@ -157,7 +202,22 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
         p->drawEllipse(m_carrot, s, s);
     }
 
-    // 5. 车辆图标（蓝色三角，指向车头）——放大便于调试
+    // 5. 三层归因 - 层 3：lookahead 距离线段（青色实线 + 末端短横标尺 + 数值标注）
+    if (m_showLookahead && m_hasVehicle && m_hasLookahead && m_lookaheadPx > 0.0) {
+        const double c = std::cos(m_yawPix), s = std::sin(m_yawPix);
+        const QPointF tip = m_vehicle + QPointF(m_lookaheadPx * c, m_lookaheadPx * s);
+        const QPointF norm(-s * 6.0, c * 6.0);
+        QPen laPen(QColor(14, 165, 233, 240), 2.0);
+        laPen.setCosmetic(true);
+        p->setPen(laPen);
+        p->drawLine(m_vehicle, tip);
+        p->drawLine(tip - norm, tip + norm);
+        p->setFont(QFont("Sans Serif", 9, QFont::Bold));
+        p->drawText(tip + QPointF(6, -6),
+                    QStringLiteral("LA %1m").arg(m_lookaheadM, 0, 'f', 2));
+    }
+
+    // 6. 车辆图标（蓝色三角，指向车头）
     if (m_hasVehicle) {
         const double len = 24.0, wid = 14.0;
         const double c = std::cos(m_yawPix), s = std::sin(m_yawPix);
@@ -174,7 +234,20 @@ void LiveOverlayItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidge
 
 // ================= LiveLayer =================
 
-LiveLayer::LiveLayer(QObject* parent) : QObject(parent) {}
+LiveLayer::LiveLayer(QObject* parent) : QObject(parent)
+{
+    m_playTimer = new QTimer(this);
+    m_playTimer->setInterval(200);
+    connect(m_playTimer, &QTimer::timeout, this, [this]() {
+        if (m_timeline.isEmpty() || m_currentFrame + 1 >= m_timeline.size()) {
+            m_playTimer->stop();
+            if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
+            return;
+        }
+        m_followLatest = false;
+        seekToFrame(m_currentFrame + 1);
+    });
+}
 
 LiveLayer::~LiveLayer()
 {
@@ -215,6 +288,7 @@ void LiveLayer::rebuildOverlay()
     if (!m_overlayGuard) {
         auto* item = new LiveOverlayItem;
         item->setZValue(0.8);
+        item->setLayerVisibility(m_showHits, m_showCarrot, m_showLookahead);
         m_scene->addItem(item);
         m_overlayGuard = item;
         m_overlay = item;
@@ -253,9 +327,120 @@ QDockWidget* LiveLayer::createControlDock(QMainWindow* win)
     v->addWidget(m_btnConnect);
 
     m_lblState = new QLabel(QObject::tr("状态：未连接"));
+    m_lblState->setWordWrap(true);
     m_lblStats = new QLabel(QObject::tr("帧：0  命中：0"));
     v->addWidget(m_lblState);
     v->addWidget(m_lblStats);
+
+    // ---- T3.3 三层归因视图 ----
+    auto* grpAttr = new QGroupBox(QObject::tr("三层归因视图"));
+    auto* vAttr = new QVBoxLayout(grpAttr);
+
+    // 1. 图层开关行
+    auto* hChk = new QHBoxLayout;
+    m_chkHits = new QCheckBox(QObject::tr("命中点(红)"));
+    m_chkCarrot = new QCheckBox(QObject::tr("Carrot(绿)"));
+    m_chkLookahead = new QCheckBox(QObject::tr("Lookahead(青)"));
+    m_chkHits->setChecked(m_showHits);
+    m_chkCarrot->setChecked(m_showCarrot);
+    m_chkLookahead->setChecked(m_showLookahead);
+    hChk->addWidget(m_chkHits);
+    hChk->addWidget(m_chkCarrot);
+    hChk->addWidget(m_chkLookahead);
+    vAttr->addLayout(hChk);
+
+    auto applyVis = [this]() {
+        m_showHits = m_chkHits ? m_chkHits->isChecked() : true;
+        m_showCarrot = m_chkCarrot ? m_chkCarrot->isChecked() : true;
+        m_showLookahead = m_chkLookahead ? m_chkLookahead->isChecked() : true;
+        if (m_overlay)
+            m_overlay->setLayerVisibility(m_showHits, m_showCarrot, m_showLookahead);
+    };
+    connect(m_chkHits, &QCheckBox::toggled, this, applyVis);
+    connect(m_chkCarrot, &QCheckBox::toggled, this, applyVis);
+    connect(m_chkLookahead, &QCheckBox::toggled, this, applyVis);
+
+    // 2. 时间轴滑块 + 帧位置
+    auto* hTime = new QHBoxLayout;
+    m_slider = new QSlider(Qt::Horizontal);
+    m_slider->setRange(0, 0);
+    m_slider->setEnabled(false);
+    m_lblFramePos = new QLabel(QObject::tr("帧 0/0  t=0.00s"));
+    hTime->addWidget(m_slider, 1);
+    hTime->addWidget(m_lblFramePos);
+    vAttr->addLayout(hTime);
+
+    connect(m_slider, &QSlider::valueChanged, this, [this](int val) {
+        if (m_playTimer && m_playTimer->isActive()) {
+            m_playTimer->stop();
+            if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
+        }
+        m_followLatest = (val + 1 >= m_timeline.size());
+        seekToFrame(val);
+    });
+
+    // 3. 播放控制与单帧截图行
+    auto* hPlay = new QHBoxLayout;
+    m_btnPrev = new QPushButton(QStringLiteral("◀"));
+    m_btnPrev->setToolTip(QObject::tr("上一帧"));
+    m_btnPlay = new QPushButton(QStringLiteral("▶"));
+    m_btnPlay->setToolTip(QObject::tr("播放 / 暂停"));
+    m_btnNext = new QPushButton(QStringLiteral(">"));
+    m_btnNext->setToolTip(QObject::tr("下一帧"));
+    m_btnShot = new QPushButton(QObject::tr("截图"));
+    m_btnPrev->setFixedWidth(36);
+    m_btnPlay->setFixedWidth(36);
+    m_btnNext->setFixedWidth(36);
+    hPlay->addWidget(m_btnPrev);
+    hPlay->addWidget(m_btnPlay);
+    hPlay->addWidget(m_btnNext);
+    hPlay->addStretch();
+    hPlay->addWidget(m_btnShot);
+    vAttr->addLayout(hPlay);
+
+    connect(m_btnPrev, &QPushButton::clicked, this, [this]() {
+        if (m_playTimer && m_playTimer->isActive()) {
+            m_playTimer->stop();
+            if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
+        }
+        if (m_currentFrame > 0) {
+            m_followLatest = false;
+            seekToFrame(m_currentFrame - 1);
+        }
+    });
+    connect(m_btnNext, &QPushButton::clicked, this, [this]() {
+        if (m_playTimer && m_playTimer->isActive()) {
+            m_playTimer->stop();
+            if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
+        }
+        if (m_currentFrame + 1 < m_timeline.size()) {
+            m_followLatest = (m_currentFrame + 2 >= m_timeline.size());
+            seekToFrame(m_currentFrame + 1);
+        }
+    });
+    connect(m_btnPlay, &QPushButton::clicked, this, &LiveLayer::togglePlay);
+    connect(m_btnShot, &QPushButton::clicked, this, [this, body]() {
+        const QString desktop = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+        const QString rid = m_runId.isEmpty() ? QStringLiteral("live") : m_runId;
+        const int idx = (m_currentFrame >= 0) ? m_currentFrame + 1 : 0;
+        const QString defPath = (desktop.isEmpty() ? QDir::homePath() : desktop)
+                              + QStringLiteral("/frame_%1_f%2.png").arg(rid).arg(idx);
+        const QString path = QFileDialog::getSaveFileName(
+            body, QObject::tr("导出单帧截图"), defPath, QObject::tr("PNG 图片 (*.png)"));
+        if (path.isEmpty()) return;
+        const bool ok = exportFrameScreenshot(path);
+        if (m_lblAttr) {
+            m_lblAttr->setText(ok ? QObject::tr("已导出截图：%1").arg(path)
+                                  : QObject::tr("导出截图失败（当前无可用场景）"));
+        }
+    });
+
+    // 4. 当前帧归因读数
+    m_lblAttr = new QLabel(QObject::tr("速度: -  | LA: -\nCarrot: - | 命中: 0"));
+    m_lblAttr->setWordWrap(true);
+    vAttr->addWidget(m_lblAttr);
+
+    v->addWidget(grpAttr);
     v->addStretch();
 
     connect(m_btnConnect, &QPushButton::toggled, this, [this](bool on) {
@@ -320,6 +505,16 @@ void LiveLayer::startLive(const QString& baseUrl, const QString& runId, const QS
     m_frames = 0;
     m_hitTotal = 0;
     m_lastError.clear();
+    m_metricsSummary.clear();
+    m_timeline.clear();
+    m_recordedPath.clear();
+    m_currentFrame = -1;
+    m_followLatest = true;
+    if (m_playTimer && m_playTimer->isActive()) m_playTimer->stop();
+    if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
+    updateTimelineUi();
+    if (m_lblAttr)
+        m_lblAttr->setText(QObject::tr("速度: -  | LA: -\nCarrot: - | 命中: 0"));
 
     rebuildOverlay();
     if (m_overlay) m_overlay->clearAll();
@@ -376,11 +571,13 @@ void LiveLayer::onConnected()
 
 void LiveLayer::onDisconnected()
 {
-    // 已因 run 失败或已完成而断开时，保留真实状态与文案，不要改成含糊的"连接断开"
+    // 已因 run 失败或已完成而断开时，保留真实状态与指标摘要，不改写成含糊的"连接断开"
     if (m_state == QStringLiteral("failed") && !m_lastError.isEmpty()) {
         emit stateChanged(m_state, 0.0, m_lastError);
-    } else if (m_state == QStringLiteral("done")) {
-        // 已完成回放时保持 done 状态与指标显示，不覆盖文案
+    } else if (m_state == QStringLiteral("done") || !m_metricsSummary.isEmpty()) {
+        m_state = QStringLiteral("done");
+        emit stateChanged(m_state, 1.0,
+                          m_metricsSummary.isEmpty() ? QStringLiteral("已完成") : m_metricsSummary);
     } else {
         m_state = QStringLiteral("disconnected");
         emit stateChanged(m_state, 0.0, QStringLiteral("连接断开"));
@@ -433,55 +630,89 @@ void LiveLayer::onTextMessage(const QString& msg)
     }
 
     if (type == QStringLiteral("status")) {
-        m_state = o.value(QStringLiteral("state")).toString();
-        emit stateChanged(m_state,
-                          o.value(QStringLiteral("progress")).toDouble(),
-                          o.value(QStringLiteral("msg")).toString());
+        const QString st = o.value(QStringLiteral("state")).toString();
+        QString dispMsg = o.value(QStringLiteral("msg")).toString();
+        double prog = o.value(QStringLiteral("progress")).toDouble();
+        // 已拿到 metrics 摘要时，不要被末尾的 "finished" / "replay finished" 覆盖掉行程与均速
+        if (st == QStringLiteral("done") && !m_metricsSummary.isEmpty()) {
+            dispMsg = m_metricsSummary;
+            prog = 1.0;
+        }
+        m_state = st;
+        emit stateChanged(m_state, prog, dispMsg);
         return;
     }
 
     if (type == QStringLiteral("frame")) {
-        ++m_frames;
-        const double wx = o.value(QStringLiteral("x")).toDouble();
-        const double wy = o.value(QStringLiteral("y")).toDouble();
-        const double yaw = o.value(QStringLiteral("yaw")).toDouble();
-        const QPointF pix = worldToPixel(wx, wy);
-        // 像素平面角 = -yaw（屏幕 y 向下）
-        m_overlay->setVehicle(pix, -yaw, true);
+        LiveFrame f;
+        f.t = o.value(QStringLiteral("t")).toDouble();
+        f.x = o.value(QStringLiteral("x")).toDouble();
+        f.y = o.value(QStringLiteral("y")).toDouble();
+        f.yaw = o.value(QStringLiteral("yaw")).toDouble();
+        f.speed = o.contains(QStringLiteral("speed"))
+                      ? o.value(QStringLiteral("speed")).toDouble()
+                      : o.value(QStringLiteral("v")).toDouble();
 
-        // carrot（世界系 → 像素）
+        QJsonValue laVal = o.value(QStringLiteral("lookahead"));
+        if (laVal.isNull() || laVal.isUndefined())
+            laVal = o.value(QStringLiteral("lookahead_dist"));
+        if (!laVal.isNull() && !laVal.isUndefined())
+            f.lookahead = laVal.toDouble();
+
         if (o.contains(QStringLiteral("carrot")) && !o.value(QStringLiteral("carrot")).isNull()) {
             const QJsonArray c = o.value(QStringLiteral("carrot")).toArray();
             if (c.size() >= 2) {
-                m_overlay->setCarrot(worldToPixel(c.at(0).toDouble(),
-                                                  c.at(1).toDouble()), true);
+                f.hasCarrot = true;
+                f.carrotWorld = QPointF(c.at(0).toDouble(), c.at(1).toDouble());
             }
         }
-        // front_hits 随帧捎带
         if (o.contains(QStringLiteral("front_hits")) &&
             !o.value(QStringLiteral("front_hits")).isNull()) {
-            QVector<QPointF> hits;
             for (const auto& v : o.value(QStringLiteral("front_hits")).toArray()) {
                 const QJsonArray hp = v.toArray();
                 if (hp.size() >= 2)
-                    hits << worldToPixel(hp.at(0).toDouble(), hp.at(1).toDouble());
+                    f.hitsWorld << QPointF(hp.at(0).toDouble(), hp.at(1).toDouble());
             }
-            m_hitTotal += hits.size();
-            m_overlay->setHits(hits);
         }
+        const QJsonValue fhd = o.value(QStringLiteral("first_hit_dist"));
+        if (!fhd.isNull() && !fhd.isUndefined())
+            f.firstHitDist = fhd.toDouble();
+
+        ++m_frames;
+        m_hitTotal += f.hitsWorld.size();
+        m_timeline.append(f);
+        m_recordedPath.append(worldToPixel(f.x, f.y));
+        updateTimelineUi();
+
+        if (m_followLatest)
+            seekToFrame(m_timeline.size() - 1);
+
         emit statsChanged(m_frames, m_hitTotal);
         return;
     }
 
     if (type == QStringLiteral("front_hits")) {
-        QVector<QPointF> hits;
+        QVector<QPointF> worldHits;
         for (const auto& v : o.value(QStringLiteral("hits")).toArray()) {
             const QJsonArray hp = v.toArray();
             if (hp.size() >= 2)
-                hits << worldToPixel(hp.at(0).toDouble(), hp.at(1).toDouble());
+                worldHits << QPointF(hp.at(0).toDouble(), hp.at(1).toDouble());
         }
-        m_hitTotal += hits.size();
-        m_overlay->setHits(hits);
+        m_hitTotal += worldHits.size();
+        if (!m_timeline.isEmpty()) {
+            m_timeline.last().hitsWorld = worldHits;
+            const QJsonValue fhd = o.value(QStringLiteral("first_hit_dist"));
+            if (!fhd.isNull() && !fhd.isUndefined())
+                m_timeline.last().firstHitDist = fhd.toDouble();
+        }
+        if (m_timeline.isEmpty() || m_currentFrame == m_timeline.size() - 1) {
+            QVector<QPointF> pixHits;
+            pixHits.reserve(worldHits.size());
+            for (const auto& wh : worldHits) pixHits << worldToPixel(wh.x(), wh.y());
+            m_overlay->setHits(pixHits);
+            if (!m_timeline.isEmpty() && m_currentFrame == m_timeline.size() - 1)
+                seekToFrame(m_currentFrame);
+        }
         emit statsChanged(m_frames, m_hitTotal);
         return;
     }
@@ -498,20 +729,128 @@ void LiveLayer::onTextMessage(const QString& msg)
     }
 
     if (type == QStringLiteral("metrics")) {
-        // 指标：行程 / 偏差 RMS / 命令数 / 综合判定
+        // 指标：行程 / 均速 / 偏差 RMS / 命令数 / 综合判定
         const QString gates = o.value(QStringLiteral("gates")).toString();
         auto num = [&](const char* k) {
             const QJsonValue v = o.value(QLatin1String(k));
             return v.isNull() || v.isUndefined() ? QStringLiteral("-")
                                                  : QString::number(v.toDouble(), 'f', 3);
         };
-        QString detail = QStringLiteral("行程 %1/%2 m  偏差RMS %3  命令 %4/%5")
+        QString detail = QStringLiteral("行程 %1/%2 m  均速 %3 m/s  偏差RMS %4  命令 %5/%6")
                              .arg(num("travel_m")).arg(num("path_length_m"))
+                             .arg(num("mean_speed"))
                              .arg(num("edge_lateral_rms"))
                              .arg(num("cmd_nonzero")).arg(num("cmd_count"));
+        m_metricsSummary = gates.isEmpty() ? detail : gates + QStringLiteral("  ") + detail;
         m_state = QStringLiteral("done");
-        emit stateChanged(m_state, 1.0,
-                          gates.isEmpty() ? detail : gates + QStringLiteral("  ") + detail);
+        emit stateChanged(m_state, 1.0, m_metricsSummary);
         return;
     }
+}
+
+void LiveLayer::updateTimelineUi()
+{
+    if (!m_slider) return;
+    const QSignalBlocker blocker(m_slider);
+    const int n = m_timeline.size();
+    m_slider->setEnabled(n > 0);
+    m_slider->setRange(0, n > 0 ? n - 1 : 0);
+    if (n == 0) {
+        m_slider->setValue(0);
+        if (m_lblFramePos) m_lblFramePos->setText(QObject::tr("帧 0/0  t=0.00s"));
+    }
+}
+
+void LiveLayer::seekToFrame(int index)
+{
+    if (index < 0 || index >= m_timeline.size()) return;
+    rebuildOverlay();
+    m_currentFrame = index;
+    const LiveFrame& f = m_timeline.at(index);
+
+    if (m_overlay) {
+        m_overlay->setVehicle(worldToPixel(f.x, f.y), -f.yaw, true);
+        if (m_recordedPath.size() >= index + 1)
+            m_overlay->setLivePath(m_recordedPath.mid(0, index + 1));
+
+        if (f.hasCarrot)
+            m_overlay->setCarrot(worldToPixel(f.carrotWorld.x(), f.carrotWorld.y()), true);
+        else
+            m_overlay->setCarrot(QPointF(), false);
+
+        QVector<QPointF> pixHits;
+        pixHits.reserve(f.hitsWorld.size());
+        for (const auto& wh : f.hitsWorld) pixHits << worldToPixel(wh.x(), wh.y());
+        m_overlay->setHits(pixHits);
+
+        const bool hasLa = (f.lookahead >= 0.0);
+        const double laPx = (hasLa && m_resolution > 0.0) ? (f.lookahead / m_resolution) : 0.0;
+        m_overlay->setLookahead(hasLa ? f.lookahead : 0.0, laPx, hasLa);
+    }
+
+    if (m_slider) {
+        const QSignalBlocker blocker(m_slider);
+        m_slider->setValue(index);
+    }
+    if (m_lblFramePos) {
+        m_lblFramePos->setText(QStringLiteral("帧 %1/%2  t=%3s")
+                                   .arg(index + 1).arg(m_timeline.size()).arg(f.t, 0, 'f', 2));
+    }
+    if (m_lblAttr) {
+        const QString laStr = (f.lookahead >= 0.0)
+                                  ? QString::number(f.lookahead, 'f', 2) + QStringLiteral("m")
+                                  : QStringLiteral("-");
+        const QString carStr = f.hasCarrot
+            ? QStringLiteral("(%1, %2)").arg(f.carrotWorld.x(), 0, 'f', 2).arg(f.carrotWorld.y(), 0, 'f', 2)
+            : QStringLiteral("-");
+        const QString hitStr = (f.firstHitDist >= 0.0)
+            ? QStringLiteral("%1个(首%2m)").arg(f.hitsWorld.size()).arg(f.firstHitDist, 0, 'f', 2)
+            : QString::number(f.hitsWorld.size());
+        m_lblAttr->setText(QStringLiteral("速度: %1 m/s | LA: %2\nCarrot: %3 | 命中: %4")
+                               .arg(f.speed, 0, 'f', 2)
+                               .arg(laStr, carStr, hitStr));
+    }
+}
+
+void LiveLayer::togglePlay()
+{
+    if (!m_playTimer || m_timeline.isEmpty()) return;
+    if (m_playTimer->isActive()) {
+        m_playTimer->stop();
+        if (m_btnPlay) m_btnPlay->setText(QStringLiteral("▶"));
+        return;
+    }
+    if (m_currentFrame < 0 || m_currentFrame + 1 >= m_timeline.size())
+        seekToFrame(0);
+    m_followLatest = false;
+    m_playTimer->start();
+    if (m_btnPlay) m_btnPlay->setText(QStringLiteral("⏸"));
+}
+
+QString LiveLayer::stateLabelText() const
+{
+    return m_lblState ? m_lblState->text() : QString();
+}
+
+bool LiveLayer::exportFrameScreenshot(const QString& filePath)
+{
+    if (!m_scene || filePath.isEmpty()) return false;
+    QFileInfo fi(filePath);
+    fi.dir().mkpath(QStringLiteral("."));
+
+    const auto views = m_scene->views();
+    if (!views.isEmpty() && views.first()) {
+        const QPixmap pm = views.first()->grab();
+        return pm.save(filePath, "PNG");
+    }
+    QRectF sr = m_scene->sceneRect();
+    if (sr.isEmpty()) sr = QRectF(0, 0, 800, 600);
+    const QSize imgSize(qBound(100, int(sr.width()), 2048),
+                        qBound(100, int(sr.height()), 2048));
+    QImage img(imgSize, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::white);
+    QPainter painter(&img);
+    m_scene->render(&painter, QRectF(QPointF(0, 0), QSizeF(imgSize)), sr);
+    painter.end();
+    return img.save(filePath, "PNG");
 }
