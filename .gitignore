@@ -25,6 +25,9 @@ __pycache__/
 # 运行时产物（run 结果通常很大，按需归档）
 runs/
 
+# 大体积测试点云（本地从 Downloads 取，不入库）
+testdata/**/*.pcd
+
 # 临时探针
 sim-bridge/qt_probe/
 /tmp/blz_*

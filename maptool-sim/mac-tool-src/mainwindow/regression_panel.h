@@ -70,6 +70,8 @@ private slots:
     void loadSelectedRunParams();
     void submitRun();
     void cancelActiveRun();
+    void openSelectedRunReport();
+    void saveSelectedRunReport();
     void onNetworkFinished(QNetworkReply* reply);
 
 private:
@@ -79,6 +81,9 @@ private:
     void showError(const QString& msg);
     void addParamRow(const QString& file, const QString& key,
                      const QString& from, const QString& to);
+    QString currentHistoryRunId() const;
+    void requestReport(int action);   // 1=浏览器打开 2=另存
+    void finishReportRequest(const QByteArray& body);
 
     QString m_bridgeUrl;
     QString m_token;
@@ -104,6 +109,10 @@ private:
     QTableWidget* m_tableParams = nullptr;
     QSpinBox* m_spinDuration = nullptr;
     QPushButton* m_btnLoadParams = nullptr;
+    QPushButton* m_btnReport = nullptr;       // T5.1 浏览器打开对比报告
+    QPushButton* m_btnSaveReport = nullptr;   // T5.1 另存报告 HTML
+    int m_reportAction = 0;                   // 0=无 1=打开 2=另存
+    QString m_reportRunId;
     QPushButton* m_btnSubmit = nullptr;
     QPushButton* m_btnCancel = nullptr;
     QPushButton* m_btnRefresh = nullptr;

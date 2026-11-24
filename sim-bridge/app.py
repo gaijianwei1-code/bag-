@@ -8,6 +8,7 @@ import threading
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Header, WebSocket
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 
@@ -583,6 +584,73 @@ def run_timeline(run_id: str, x_bridge_token: Optional[str] = Header(None)):
         metrics = run.get("metrics")
     return {"schema": "timeline/v1", "run_id": run_id, "frames": frames,
             "metrics": metrics}
+
+
+# ---------- T5.1 一键导出对比报告 ----------
+def _run_snapshot(run_id: str) -> Optional[dict]:
+    """取 run 的浅拷贝快照；在内存里就 DeepCopy 掉 frames 引用，避免写报告
+    期间被 WS 线程追加（frames 列表是共享的）。"""
+    with _runs_lock:
+        r = _runs.get(run_id)
+        if r:
+            snap = dict(r)
+            snap["frames"] = list(r.get("frames") or [])
+            return snap
+    return _load_run_if_needed(run_id)
+
+
+def _venue_for_run(run: dict) -> Optional[dict]:
+    vid = (run.get("req") or {}).get("venue_id")
+    if not vid:
+        return None
+    p = os.path.join(VENUES_DIR, f"{vid}.yaml")
+    if not os.path.isfile(p):
+        return None
+    try:
+        return V.load_venue(p)
+    except V.yaml.YAMLError:
+        return None
+
+
+@app.get("/runs/{run_id}/report")
+def run_report(run_id: str, download: int = 0,
+               x_bridge_token: Optional[str] = Header(None)):
+    """生成单文件 HTML 对比报告（T5.1）。
+
+    - 默认 `text/html` 直接返回，浏览器/内嵌 WebView 可直接看；
+    - `?download=1` 时以附件形式下载，供现场归档到验收单目录。
+    同一 run 的报告是确定性的：重复请求内容一致（除生成时间戳）。
+    """
+    _auth(x_bridge_token)
+    import report as R
+
+    run = _run_snapshot(run_id)
+    if not run:
+        raise HTTPException(404, f"run 不存在：{run_id}")
+
+    venue = _venue_for_run(run)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        body = R.build_report(run_id, run, venue=venue, base_dir=base_dir)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"报告生成失败：{e}")
+
+    # 顺手落盘一份，验收单体系按目录取用；失败不影响响应
+    try:
+        out_dir = os.path.join(RUNS_DIR, run_id)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "report.html"), "w",
+                  encoding="utf-8") as f:
+            f.write(body)
+    except OSError:
+        pass
+
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = (
+            f'attachment; filename="{R.report_filename(run_id)}"')
+    return Response(content=body, media_type="text/html; charset=utf-8",
+                    headers=headers)
 
 
 @app.websocket("/ws/runs/{run_id}/stream")

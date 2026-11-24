@@ -15,7 +15,7 @@
 | `POST /runs` | 见 §2 | `{run_id}` 202 | 提交回归 run（异步执行） |
 | `GET /runs/{id}` | — | manifest + 状态 + 指标 | 轮询用；WS 断线后补拉 |
 | `GET /runs/{id}/timeline` | — | timeline JSON（T0.1） | 跑完整份下载（直播丢失帧的兜底） |
-| `GET /runs/{id}/report` | — | compare.md / 报告文件 | 结果档案 |
+| `GET /runs/{id}/report` | `?download=1`（可选） | 单文件 HTML 对比报告（T5.1） | 默认 `text/html` 直出；`download=1` 带 `Content-Disposition: attachment`。判定值直读容器 `compare.json`，缺数据标"无数据" |
 | `GET /branches` | `repo=roboneo_sim` | `[{branch, commit, date}]` | 分支下拉（T4.1） |
 
 ## 2. `POST /runs` 请求体

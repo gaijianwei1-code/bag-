@@ -23,6 +23,12 @@
 #include <QJsonArray>
 #include <QUrl>
 #include <QColor>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QDesktopServices>
+#include <QUrlQuery>
 
 RegressionPanel::RegressionPanel(const QString& bridgeUrl, const QString& token,
                                  QWidget* parent)
@@ -113,8 +119,17 @@ void RegressionPanel::setupUi()
     m_comboHistoryRun = new QComboBox;
     m_btnLoadParams = new QPushButton(tr("载回参数"));
     m_btnLoadParams->setEnabled(false);
+    m_btnReport = new QPushButton(tr("查看对比报告"));
+    m_btnReport->setToolTip(tr("T5.1：用浏览器打开本次 run 的单文件 HTML 对比报告\n"
+                               "（8 项 F 门 / 轨迹图 / 问题点位帧截图 / 参数 diff）"));
+    m_btnReport->setEnabled(false);
+    m_btnSaveReport = new QPushButton(tr("另存报告"));
+    m_btnSaveReport->setToolTip(tr("把报告 HTML 存到本地，归档进验收单目录"));
+    m_btnSaveReport->setEnabled(false);
     hHistory->addWidget(m_comboHistoryRun, 1);
     hHistory->addWidget(m_btnLoadParams);
+    hHistory->addWidget(m_btnReport);
+    hHistory->addWidget(m_btnSaveReport);
     vParams->addLayout(hHistory);
 
     m_tableParams = new QTableWidget(0, 4);
@@ -180,6 +195,10 @@ void RegressionPanel::setupUi()
     connect(btnNewVenue, &QPushButton::clicked, this, &RegressionPanel::newVenueRequested);
     connect(m_btnLoadParams, &QPushButton::clicked,
             this, &RegressionPanel::loadSelectedRunParams);
+    connect(m_btnReport, &QPushButton::clicked,
+            this, &RegressionPanel::openSelectedRunReport);
+    connect(m_btnSaveReport, &QPushButton::clicked,
+            this, &RegressionPanel::saveSelectedRunReport);
     connect(m_chkRunnableOnly, &QCheckBox::toggled, this, [this](bool) {
         fetchVenues();
     });
@@ -377,6 +396,102 @@ void RegressionPanel::loadSelectedRunParams()
     m_lblStatus->setStyleSheet("color: blue;");
 }
 
+// ---------- T5.1 对比报告 ----------
+QString RegressionPanel::currentHistoryRunId() const
+{
+    if (!m_comboHistoryRun) return QString();
+    const QString rid = m_comboHistoryRun->currentData().toString();
+    return rid.trimmed();
+}
+
+void RegressionPanel::requestReport(int action)
+{
+    const QString rid = currentHistoryRunId();
+    if (rid.isEmpty()) {
+        showError(tr("请先选择一条有效的历史 run（报告按 run 归档生成）"));
+        return;
+    }
+    // 不能用 QDesktopServices::openUrl 直接开 /report：普通浏览器请求带不了
+    // X-Bridge-Token 头，必然 401。所以两种动作都先由 QNAM 取回内容：
+    //   action=1 → 写临时文件后交给系统默认浏览器打开
+    //   action=2 → 弹保存对话框，落到用户选的位置（归档进验收单目录）
+    m_reportAction = action;
+    m_reportRunId = rid;
+
+    QNetworkRequest req{QUrl(m_bridgeUrl + "/runs/" + rid + "/report")};
+    req.setRawHeader("X-Bridge-Token", m_token.toUtf8());
+    m_nam->get(req);
+
+    m_lblStatus->setText(tr("正在生成 %1 的对比报告…").arg(rid));
+    m_lblStatus->setStyleSheet("color: blue;");
+    if (m_btnReport) m_btnReport->setEnabled(false);
+    if (m_btnSaveReport) m_btnSaveReport->setEnabled(false);
+}
+
+void RegressionPanel::openSelectedRunReport()
+{
+    requestReport(1);
+}
+
+void RegressionPanel::saveSelectedRunReport()
+{
+    requestReport(2);
+}
+
+void RegressionPanel::finishReportRequest(const QByteArray& body)
+{
+    const int action = m_reportAction;
+    const QString rid = m_reportRunId;
+    m_reportAction = 0;
+    m_reportRunId.clear();
+    if (m_btnReport) m_btnReport->setEnabled(m_comboHistoryRun &&
+                                             !currentHistoryRunId().isEmpty());
+    if (m_btnSaveReport) m_btnSaveReport->setEnabled(m_comboHistoryRun &&
+                                                     !currentHistoryRunId().isEmpty());
+
+    if (body.isEmpty()) {
+        showError(tr("报告为空（run 可能没有可导出的数据）"));
+        return;
+    }
+
+    QString path;
+    if (action == 2) {
+        const QString suggested =
+            QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+                .filePath(QStringLiteral("report_%1.html").arg(rid));
+        path = QFileDialog::getSaveFileName(
+            this, tr("另存对比报告"), suggested, tr("HTML 报告 (*.html)"));
+        if (path.isEmpty()) {           // 用户取消
+            m_lblStatus->setText(tr("已取消保存"));
+            m_lblStatus->setStyleSheet("color: #6b7280;");
+            return;
+        }
+    } else {
+        path = QDir(QDir::tempPath())
+                   .filePath(QStringLiteral("maptool_report_%1.html").arg(rid));
+    }
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        showError(tr("写入报告失败：%1\n%2").arg(path, f.errorString()));
+        return;
+    }
+    f.write(body);
+    f.close();
+
+    if (action == 2) {
+        m_lblStatus->setText(tr("报告已保存：%1").arg(path));
+        m_lblStatus->setStyleSheet("color: green;");
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        showError(tr("报告已生成，但调起浏览器失败：\n%1").arg(path));
+        return;
+    }
+    m_lblStatus->setText(tr("已在浏览器打开 %1 的对比报告").arg(rid));
+    m_lblStatus->setStyleSheet("color: green;");
+}
+
 void RegressionPanel::submitRun()
 {
     // 拦不可跑的场地：直接提示，不发请求（发了也是 0.1 秒后 failed，
@@ -491,13 +606,28 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
             showError(tr("%1（HTTP %2）").arg(err).arg(http));
         }
         m_btnSubmit->setEnabled(true);
+        if (m_reportAction != 0) {
+            m_reportAction = 0;
+            m_reportRunId.clear();
+            if (m_btnReport) m_btnReport->setEnabled(true);
+            if (m_btnSaveReport) m_btnSaveReport->setEnabled(true);
+        }
         reply->deleteLater();
         return;
     }
 
     const QByteArray data = reply->readAll();
-    const QJsonDocument doc = QJsonDocument::fromJson(data);
     const QString url = reply->request().url().path();
+
+    // T5.1：报告是 HTML 不是 JSON，必须最先分流，否则会被下面的
+    // QJsonDocument::fromJson 解析成空文档，落到笼统的 run 详情分支。
+    if (url.endsWith("/report")) {
+        finishReportRequest(data);
+        reply->deleteLater();
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(data);
 
     if (url.endsWith("/branches")) {
         m_comboBranch->clear();
@@ -580,6 +710,8 @@ void RegressionPanel::onNetworkFinished(QNetworkReply* reply)
         if (!hasRuns)
             m_comboHistoryRun->addItem(tr("（暂无历史 run）"), QString());
         if (m_btnLoadParams) m_btnLoadParams->setEnabled(hasRuns);
+        if (m_btnReport) m_btnReport->setEnabled(hasRuns);
+        if (m_btnSaveReport) m_btnSaveReport->setEnabled(hasRuns);
     }
     else if (url.endsWith("/runs") && reply->operation() == QNetworkAccessManager::PostOperation) {
         const QJsonObject o = doc.object();
