@@ -261,6 +261,19 @@ def test_param_table_applied_mismatch_flagged():
     assert "FAIL" in html
 
 
+def test_param_table_container_diffs():
+    """容器 param_diffs 与 MapTool param_changes 是两回事：
+    一个说"实际快照差在哪"，一个说"想改成什么"，两者都要展示。"""
+    g = {"applied": {}, "param_diffs": {
+        "status": "ok",
+        "changes": [{"param": "goal_count", "baseline": 4, "candidate": 3}],
+        "total": 3}}
+    html = R._param_table(_fake_run(), g)
+    assert "param_diffs" in html
+    assert "goal_count" in html
+    assert "共 3 处差异" in html
+
+
 def test_param_table_none_declared():
     html = R._param_table(_fake_run(), {"applied": {}})
     assert "未修改任何参数" in html
@@ -348,6 +361,32 @@ def test_timeseries_flat_series_ok():
     frames = [{"t": i, "speed": 0.0} for i in range(5)]
     html = R.render_timeseries(frames, "speed", "#000", "速度", "m/s")
     assert "<svg" in html and "d=\"M" in html
+
+
+def test_closed_loop_semantic_labels():
+    """布尔型检查不能直接打 true/false："无碰撞"行显示 false 却是 PASS，
+    读起来像自相矛盾。必须换成本行语义文案。"""
+    cl = {"checks": {"collision": True, "progress_100": False,
+                     "terminal": False, "edge_rms": True,
+                     "brush_min": True, "no_failure_codes": False},
+          "summary": {"progress_peak": 32.0, "collision": False,
+                      "terminal": False, "edge_rms": 0.0057,
+                      "failure_codes": ["PROGRESS_INCOMPLETE"]},
+          "clearance": {"brush_clearance": {"min": 0.134}}}
+    html = R._closed_loop_table(cl)
+    assert "未发生" in html and ">false<" not in html
+    assert "否（峰值 32.0%）" in html
+    assert "PROGRESS_INCOMPLETE" in html
+
+
+def test_closed_loop_missing_is_na_not_fail():
+    html = R._closed_loop_table({"checks": {"collision": False},
+                                 "summary": {}})
+    row = [ln for ln in html.split("<tr") if "无碰撞" in ln][0]
+    assert "—" in row
+    assert "FAIL" in row        # 容器明确判 False → 如实标 FAIL
+    empty = R._closed_loop_table({})
+    assert "未产出闭环检查" in empty
 
 
 # ---------------------------------------------------------------- 端到端 HTML

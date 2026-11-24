@@ -308,6 +308,7 @@ def extract_gates(record: Optional[dict]) -> Dict[str, Any]:
         "closed_loop": cmp.get("closed_loop") or {},
         "screening_block": cmp.get("screening") or {},
         "applied": cmp.get("applied") or {},
+        "param_diffs": cmp.get("param_diffs") or {},
         "extra": {
             "truth_brush_min": brush_t,
             "sim_brush_min": brush_b,
@@ -770,9 +771,23 @@ def _closed_loop_table(cl: Dict[str, Any]) -> str:
             val = summary.get("collision")
         else:
             val = checks.get(key)
-        shown = ("—" if val is None
-                 else ("true" if val is True else "false" if val is False
-                       else _fmt(val, 3)))
+        # 布尔值直接打 true/false 会跟"结果"列打架："无碰撞"行显示 false
+        # 却是 PASS，读起来像自相矛盾。改成该行自己的语义文案。
+        if key == "collision":
+            shown = ("—" if val is None
+                     else ("未发生" if val is False else "已发生"))
+        elif key == "progress_100":
+            peak = summary.get("progress_peak")
+            ptxt = "" if peak is None else f"（峰值 {float(peak):.1f}%）"
+            shown = ("—" if val is None else ("是" if val else "否") + ptxt)
+        elif key == "terminal":
+            shown = ("—" if val is None else ("是" if val else "否"))
+        elif key == "no_failure_codes":
+            codes = summary.get("failure_codes") or []
+            shown = ("—" if val is None
+                     else ("是" if val else _esc(", ".join(map(str, codes)))))
+        else:
+            shown = _fmt(val, 3)
         rows.append(f'<tr><td>{_esc(name)}</td><td class="num">{shown}</td>'
                     f'<td>{_esc(hint)}</td><td>{_badge(ok)}</td></tr>')
     return ('<table><thead><tr><th>闭环检查</th><th>值</th><th>门限</th>'
@@ -786,8 +801,14 @@ def _param_table(run: dict, g: Dict[str, Any]) -> str:
     plan = run.get("param_plan") or []
     applied = (g.get("applied") or {}).get("rows") or []
     overrides = _get(run, "req", "param_overrides", default={}) or {}
+    # 容器的 param_diffs：真正生效的参数差异（structure: {param,baseline,candidate}）。
+    # 与 MapTool 提交的 param_changes 互为佐证——一个说"想改成什么"，一个说
+    # "实际快照里差在哪"，两者都展示才看得出改参是否落到点上。
+    diffs = _get(g, "param_diffs", "changes", default=[]) or []
+    diffs_total = _get(g, "param_diffs", "total")
+    diffs_status = _get(g, "param_diffs", "status")
 
-    if not (changes or plan or applied or overrides):
+    if not (changes or plan or applied or overrides or diffs):
         return ('<p class="muted">本次 run 未修改任何参数（全过程使用基线参数集 '
                 f'<code>{_esc(run.get("baseline_param_set") or "默认")}</code>）。</p>')
 
@@ -824,6 +845,21 @@ def _param_table(run: dict, g: Dict[str, Any]) -> str:
         blocks.append('<h3>容器侧生效校验（compare.json → applied）</h3>'
                       '<table><thead><tr><th>ROS 参数</th><th>实际</th>'
                       '<th>期望</th><th>一致</th></tr></thead><tbody>'
+                      f'{rows}</tbody></table>')
+    if diffs:
+        rows = "".join(
+            f'<tr><td><code>{_esc(d.get("param"))}</code></td>'
+            f'<td class="num">{_esc(d.get("baseline"))}</td>'
+            f'<td class="num">{_esc(d.get("candidate"))}</td></tr>'
+            for d in diffs if isinstance(d, dict))
+        blurb = (f"共 {_esc(diffs_total if diffs_total is not None else len(diffs))} 处差异"
+                 + (f"，快照状态 <code>{_esc(diffs_status)}</code>"
+                    if diffs_status else ""))
+        blocks.append('<h3>容器侧参数快照差异（compare.json → param_diffs）</h3>'
+                      f'<p class="muted">{blurb}。此项对比基线与候选两次快照的'
+                      '实际取值，是"改参真的落到配置文件里"的硬证据。</p>'
+                      '<table><thead><tr><th>参数</th><th>基线</th>'
+                      '<th>候选</th></tr></thead><tbody>'
                       f'{rows}</tbody></table>')
 
     meta = []
