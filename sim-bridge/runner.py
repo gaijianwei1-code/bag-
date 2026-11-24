@@ -32,11 +32,16 @@ class RunError(Exception):
 
 
 def _exec(cmd, timeout=120, check=True):
-    # 关键（2026-11-24 事故）：docker exec 启动的子进程必须随调用方一起被干掉。
-    # 否则 bridge 或上游超时退出后，容器内 roslaunch/rosbag record 会变成孤儿，
-    # 继续写盘直到撑爆磁盘（w16_baseline 曾写满 373 GB）。
-    p = subprocess.run(["docker", "exec", CONTAINER, "bash", "-lc", cmd],
-                       capture_output=True, text=True, timeout=timeout)
+    # 2026-11-24 事故：subprocess.run 超时只杀掉宿主机上的 docker CLI 进程，
+    # 容器内由 roslaunch 拉起的 rosbag record / virtual_lidar 不会跟着死，
+    # 会变成孤儿持续写盘。因此超时时必须显式进容器杀一次。
+    try:
+        p = subprocess.run(["docker", "exec", CONTAINER, "bash", "-lc", cmd],
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_stale_sim_procs("all")
+        raise RunError("CONTAINER_CMD_TIMEOUT",
+                       f"命令超时 {timeout}s，已强制清理容器内遗留仿真进程：{cmd[:120]}")
     if check and p.returncode != 0:
         raise RunError("CONTAINER_CMD_FAILED",
                        f"{cmd[:120]} -> rc={p.returncode}: {p.stderr[-400:]}")
