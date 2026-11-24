@@ -240,6 +240,10 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
 
     m_spinFront  = mkSpin(0.2, 20.0, 0.5, m_front_dist);
     m_spinMargin = mkSpin(0.0, 1.50, 0.05, m_margin);
+    m_spinMargin->setToolTip(QObject::tr(
+        "两侧检测框额外放宽的余量。默认 0 = 按真实车宽 1.50m 判定净空。\n"
+        "想和 costmap 膨胀半径(0.25m)对齐时可调回 0.25——但那会把贴边清扫\n"
+        "正常贴墙的段全部算成命中（实测 2.6% → 21.2%）。"));
     m_spinMargin->setEnabled(m_rectMode);
     m_spinHalf   = mkSpin(1.0, 89.0, 5.0, m_half_angle_deg);
     m_spinHalf->setEnabled(!m_rectMode);
@@ -587,7 +591,14 @@ void FovLayer::recalcAll()
             }
             if (m_rectMode) {
                 // 屏幕坐标系 y 向下：车体左侧(+y_world) 对应屏幕 -ly，右侧(-y_world) 对应屏幕 +ly
-                const double xMinPx = -(kHalfL + (forcePass ? 0.0 : m_margin)) * invRes;
+                //
+                // 2026-11-24 修正：命中检测区**只保留车头前方**。
+                // 原来 xMinPx 从车尾 -(kHalfL+margin) 起算，矩形覆盖了整个车身，
+                // 于是"车贴着墙走"必然命中车侧/车尾格 → 贴边清扫全程误报。
+                // planner 的 collision_time_* 只做前向预测（沿速度方向前推
+                // 0.4×t 米），从不检查车身两侧与后方，故此处与之对齐。
+                // 车身本身仍由轨迹点/车辆图标表示，不需要再用检测框画一遍。
+                const double xMinPx = kHalfL * invRes;                    // 车头前沿
                 const double xMaxPx = (kHalfL + frontDist) * invRes;
                 const double leftPx  = (kHalfW + leftMargin) * invRes;
                 const double rightPx = (kHalfW + rightMargin) * invRes;
@@ -624,12 +635,13 @@ void FovLayer::recalcAll()
                 blz::FovResult res;
                 if (m_rectMode) {
                     blz::RectParams rp;
-                    rp.x_min = -(kHalfL + (forcePass ? 0.0 : m_margin));
+                    // 与上面绘制完全一致：只扫车头前方，不含车身本体
+                    rp.x_min = kHalfL;
                     rp.x_max = kHalfL + frontDist;
                     rp.y_min = -(kHalfW + rightMargin);
                     rp.y_max =  (kHalfW + leftMargin);
                     rp.max_hits = 48;
-                    rp.ref_x = kHalfL;
+                    rp.ref_x = kHalfL;    // 距离以车头前沿为 0
                     res = blz::cast_rect(*primaryGrid, wx, wy, yaw, rp);
                 } else {
                     blz::FovParams fp;
@@ -667,8 +679,11 @@ void FovLayer::recalcAll()
                         e.sectorColor = QColor(239, 68, 68, 52);    // 危险红框
                         e.borderColor = QColor(220, 38, 38, 210);
                         if (res.first_hit_dist >= 0.0 && (i % 3 == 0 || hits <= 5)) {
+                            // 检测区已从车头前沿起算，first_hit_dist 不会再是负数；
+                            // 原来的"车身擦碰!"措辞会让人以为真车撞了，改为如实描述：
+                            // 车头正前方紧贴障碍（distance≈0 表示车头前沿即有障碍）。
                             e.label = (res.first_hit_dist <= 0.01)
-                                ? QObject::tr("车身擦碰!")
+                                ? QObject::tr("车头贴障!")
                                 : QObject::tr("前视 %1m").arg(res.first_hit_dist, 0, 'f', 2);
                         }
                     } else {
@@ -708,7 +723,7 @@ void FovLayer::recalcAll()
             m_lblSummary->setStyleSheet("color: #b45309; font-size: 12px;");
         } else if (hits > 0) {
             const QString distTxt = (minHitDist <= 0.01)
-                ? QObject::tr("存在车身擦碰!")
+                ? QObject::tr("车头正前方贴障!")
                 : QObject::tr("最近前视 %1m").arg(minHitDist < 1e17 ? minHitDist : 0.0, 0, 'f', 2);
             m_lblSummary->setText(QObject::tr("危险点：%1 / %2（%3）")
                                       .arg(hits).arg(totalPts).arg(distTxt) + suffix);

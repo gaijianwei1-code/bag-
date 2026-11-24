@@ -98,17 +98,35 @@ int main(int argc, char** argv) {
 
         // ---- 命中路径：墙场景 → 命中数 > 0（覆盖红点渲染分支）----
         // 轨迹点1 像素(1050,3000) → 世界 (52.5, 149.95)，yaw=0 朝 +x
-        // 在世界 x=52.7（正前方 0.2m）放一列墙点
+        //
+        // 2026-11-24 口径修正：检测区现在**只扫车头前方**（从车头前沿 +0.925m 起，
+        // 不含车身两侧与后方），裕度默认 0。所以墙必须放在车头前沿之外才会命中。
+        // 原来把墙放在正前方 0.2m（= 车身内部），按新口径不该命中——那个断言
+        // 描述的是旧行为。这里改放 0.925+0.30 ≈ 1.23m 处，仍在直线档 1.20m 内。
         {
             std::vector<Vec3> wall;
+            const float wall_x = 52.5f + 1.10f;   // 车头前沿外 0.175m，检测距离内
             for (float yy = 149.0f; yy <= 151.0f; yy += 0.05f)
-                wall.push_back({52.7f, yy, 0.8f});
+                wall.push_back({wall_x, yy, 0.8f});
             auto gwall = project_to_grid(wall, 0.4, 0.05, 2.0);
             layer.setGrid(&gwall);
             int wall_hits = -1;
             QObject::connect(&layer, &FovLayer::recalculated, [&](int h){ wall_hits = h; });
             layer.recalcAll();
-            CHECK(wall_hits >= 1, "wall ahead of trajectory point -> hit counted");
+            CHECK(wall_hits >= 1, "wall ahead of front bumper -> hit counted");
+
+            // 反面：墙体放在车身内部（车头前沿之后）不该算命中
+            std::vector<Vec3> inner;
+            for (float yy = 149.0f; yy <= 151.0f; yy += 0.05f)
+                inner.push_back({52.5f + 0.20f, yy, 0.8f});
+            auto ginner = project_to_grid(inner, 0.4, 0.05, 2.0);
+            layer.setGrid(&ginner);
+            int inner_hits = -1;
+            QObject::connect(&layer, &FovLayer::recalculated, [&](int h){ inner_hits = h; });
+            layer.recalcAll();
+            CHECK(inner_hits == 0, "wall inside car body -> NOT counted (new geometry)");
+
+            layer.setGrid(&grid);   // 还原，供后续断言
         }
 
         // 开关关闭 → overlay 移出场景

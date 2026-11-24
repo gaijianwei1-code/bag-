@@ -24,6 +24,8 @@ __pycache__/
 
 # 运行时产物（run 结果通常很大，按需归档）
 runs/
+# 容器回导的 run 元数据快照（W16 取证等，本地留存不入库）
+archive/
 
 # 大体积测试点云（本地从 Downloads 取，不入库）
 testdata/**/*.pcd
