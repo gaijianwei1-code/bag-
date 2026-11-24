@@ -97,6 +97,50 @@ static void test_front_dist_for_point() {
           "直线点 → 1.20m");
 }
 
+// ---------------------------------------------------------------- 真实轨迹分布
+// 南岸晶都 1119主路.json（4134 点）的实际属性分布，作为回归基线：
+//   直线 3092 / 曲线不绕行 857 / 曲线掉头 155 / 一般曲线 30
+// 若哪天 pickScene 改坏（比如掉头判不进、bypass 反相丢了），这条会立刻红。
+static void test_real_trajectory_distribution() {
+    // (curve_paths, turnAround, bypass) → 点数
+    struct Row { int c, t, b, n; DriveScene expect; };
+    // 注意：turnAround 优先于 bypass，所以 (1,1,1) 那 155 点是从
+    // (curve=1,bypass=1) 的 1012 点里再切出来的，no_bypass 只剩 1012-155=857。
+    // 早先按属性列分别统计再加总会重复计数，这里按"最终落进哪一档"归并。
+    const Row rows[] = {
+        {0, 0, 0,  484, DriveScene::Straight},        // 直+可绕行
+        {0, 0, 1, 2608, DriveScene::Straight},        // 直+不绕行（bypass 被忽略，与 planner 一致）
+        {1, 0, 0,   30, DriveScene::Curve},           // 曲线+可绕行
+        {1, 0, 1,  857, DriveScene::CurveNoBypass},   // 曲线+不绕行（1012 减去掉头）
+        {1, 1, 1,  155, DriveScene::CurveTurnAround}, // 掉头
+        {1, 1, 0,    0, DriveScene::CurveTurnAround}, // 真实数据里掉头点 bypass 均为 1
+    };
+    PlannerLimits lim;
+    int total = 0;
+    double minDist = 1e9, maxDist = -1e9;
+    for (const auto& r : rows) {
+        const auto sc = pickScene(mk(r.c, r.t, r.b));
+        CHECK(sc == r.expect, "真实分布：场景判定与预期一致");
+        if (r.n > 0) {
+            total += r.n;
+            const double d = sceneFrontDist(lim, sc);
+            if (d < minDist) minDist = d;
+            if (d > maxDist) maxDist = d;
+        }
+    }
+    CHECK(total == 4134, "四点合计应等于真实轨迹点数 4134");
+
+    // 关键：四档里必须出现三种不同距离（掉头 0.40 / 曲线 0.80 / 直线 1.20）
+    // 若 regression 里某两档被合并，这条会红。
+    CHECK(NEAR(minDist, 0.40, 1e-9), "真实分布最小距离 = 掉头 0.40m");
+    CHECK(NEAR(maxDist, 1.20, 1e-9), "真实分布最大距离 = 直线 1.20m");
+
+    // 掉头点必须真的比直线点近 3 倍，这是"分场景"的意义所在
+    CHECK(NEAR(sceneFrontDist(lim, DriveScene::Straight)
+               / sceneFrontDist(lim, DriveScene::CurveTurnAround), 3.0, 1e-9),
+          "直线距离是掉头的 3 倍");
+}
+
 // ---------------------------------------------------------------- yaml 解析
 static void test_yaml_parse_full() {
     const char* y =
@@ -179,6 +223,7 @@ int main() {
     test_vel_override();
     test_zero_time_guard();
     test_front_dist_for_point();
+    test_real_trajectory_distribution();
     test_yaml_parse_full();
     test_yaml_prefix_trap();
     test_yaml_missing_keeps_defaults();

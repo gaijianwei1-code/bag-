@@ -46,6 +46,10 @@ public:
         QPointF labelPos;
         bool isHit = false;
         QVector<QPointF> dots;   // 命中点（像素坐标）
+        // T3.4：该点用的场景档位（用于图上区分直线/弯道/掉头），
+        // sceneTag 为空表示未启用分场景模式（旧行为，不标注）。
+        QString sceneTag;        // "直" / "弯" / "弯·不绕行" / "掉头"
+        QColor sceneColor;       // 该档位配色（画检测框边框用）
     };
 
     explicit FovOverlayItem(QGraphicsItem* parent = nullptr);
@@ -112,6 +116,11 @@ public slots:
     bool plannerMode() const { return m_plannerMode; }
     // 冒烟用：某场景当前生效的检测距离（米）
     double frontDistForScene(blz::DriveScene s) const;
+    // 冒烟用：上一轮重算各档点数（索引同 DriveScene 枚举）
+    int scenePointCount(blz::DriveScene s) const {
+        return m_sceneCount[static_cast<int>(s)];
+    }
+    QString sceneBreakdownText() const;   // "直线 3092点(1.20m) · 掉头 155点(0.40m)"
 
 signals:
     void recalculated(int hitCount);   // 重算完成（冒烟断言用）
@@ -121,6 +130,7 @@ private:
     void destroyOverlay();
     void scheduleRecalc();      // 场景 changed 防抖（拖点即时刷新）
     void rebuildOverlay();
+    QString plannerHintText() const;
 
     BQGraphicsScene* m_scene = nullptr;
     QList<BPathItem*> m_paths;
@@ -137,9 +147,11 @@ private:
     double m_half_angle_deg = 30.0;
     double m_zmax = 2.0;
     double m_margin = 0.25;     // 实车矩形单侧安全裕度（对应 costmap 膨胀，默认 0.25m）
-    // T3.4：planner 同口径模式。关闭时沿用固定 m_front_dist（兼容旧行为）。
-    bool m_plannerMode = false;
+    // T3.4：planner 同口径模式。默认开启——前视距离本来就该跟随轨迹点属性；
+    // 关掉才回到"全程固定值"的旧行为（保留给需要排除属性影响的排查场景）。
+    bool m_plannerMode = true;
     blz::PlannerLimits m_limits;
+    int m_sceneCount[4] = {0, 0, 0, 0};   // 按 DriveScene 索引的点数统计
     int m_obstacleSource = SourcePgm; // 默认优先用修过的地图 (.pgm)，无 pgm 时自动退回 .pcd
     bool m_rectMode = true;     // 默认实车矩形净空检测（1.85×1.50m + 前视框）
     bool m_enabled = false;

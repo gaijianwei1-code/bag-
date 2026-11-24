@@ -94,8 +94,19 @@ void FovOverlayItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, Q
         for (const auto& e : m_entries) {
             if (e.isHit != drawHit) continue;
             if (!e.sector.isEmpty()) {
-                if (e.borderColor.alpha() > 0) {
-                    QPen bp(e.borderColor, drawHit ? 1.6 : 0.8);
+                // T3.4：分场景模式下用档位配色画边框，让"这一段是直线还是弯道"
+                // 在图上直接可辨；命中时仍用红色警示边框盖住，不牺牲告警强度。
+                const bool useScene = !e.sceneTag.isEmpty() && e.sceneColor.alpha() > 0;
+                if (drawHit && e.borderColor.alpha() > 0) {
+                    QPen bp(e.borderColor, 1.6);
+                    bp.setCosmetic(true);
+                    painter->setPen(bp);
+                } else if (useScene) {
+                    QPen bp(e.sceneColor, 0.9);
+                    bp.setCosmetic(true);
+                    painter->setPen(bp);
+                } else if (e.borderColor.alpha() > 0) {
+                    QPen bp(e.borderColor, 0.8);
                     bp.setCosmetic(true);
                     painter->setPen(bp);
                 } else {
@@ -118,6 +129,16 @@ void FovOverlayItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, Q
                 painter->drawText(e.labelPos, e.label);
             }
         }
+    }
+
+    // T3.4：档位标识单独一趟画在最上层（灰色小字），避免被危险红字淹掉。
+    // 只在分场景模式下存在 sceneTag，旧模式不画，零回归。
+    painter->setFont(QFont("Sans Serif", 7));
+    for (const auto& e : m_entries) {
+        if (e.sceneTag.isEmpty() || e.sector.isEmpty()) continue;
+        painter->setPen(e.sceneColor.alpha() > 0 ? e.sceneColor
+                                                 : QColor(110, 110, 110, 200));
+        painter->drawText(e.labelPos + QPointF(0, 10), e.sceneTag);
     }
 }
 
@@ -227,20 +248,28 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
     form->addRow(QObject::tr("检测模式"), m_comboMode);
 
     // T3.4：前视距离来源切换
-    m_chkPlanner = new QCheckBox(QObject::tr("按 planner 分场景（0.4×collision_time）"));
+    m_chkPlanner = new QCheckBox(QObject::tr("按轨迹属性分档（弯道/掉头自动切换前视距离）"));
     m_chkPlanner->setToolTip(QObject::tr(
-        "开启后前视检测距离与 PursuitLocalPlanner 的碰撞检测完全同口径：\n"
-        "距离 = 0.4 m/s × collision_time_*，按轨迹点的 curve_paths / turnAround /\n"
-        "bypass 属性分四档。此时「前视距离」输入框仅作兜底。\n"
-        "注意 bypass=1 在工程里表示「不允许绕行」。"));
+        "默认开启。前视检测距离与 PursuitLocalPlanner 的碰撞检测完全同口径：\n"
+        "距离 = 0.4 m/s × collision_time_*，按每个轨迹点的属性自动切档：\n"
+        "  直线               → 1.20 m（灰蓝）\n"
+        "  弯道（可绕行）      → 0.80 m（蓝）\n"
+        "  弯道（不允许绕行）  → 0.80 m（紫）\n"
+        "  弯道 + 掉头         → 0.40 m（橙）\n"
+        "属性来自轨迹 JSON 的 curve_paths / turnAround / bypass 字段（导入即生效）。\n"
+        "注意：JSON 里 bypass=1 表示「不允许绕行」（工程语义与字面相反）。\n"
+        "取消勾选则全程用固定的「前视距离」——排查属性影响时用。"));
+    m_chkPlanner->setChecked(m_plannerMode);
     form->addRow(QString(), m_chkPlanner);
     m_lblPlannerHint = new QLabel;
     m_lblPlannerHint->setStyleSheet("color:#6b7280; font-size:11px;");
     m_lblPlannerHint->setWordWrap(true);
-    m_lblPlannerHint->setVisible(false);
+    m_lblPlannerHint->setText(plannerHintText());
+    m_lblPlannerHint->setVisible(m_plannerMode);
     form->addRow(QString(), m_lblPlannerHint);
 
     form->addRow(QObject::tr("前视距离 (m)"), m_spinFront);
+    if (m_plannerMode) m_spinFront->setEnabled(false);
     form->addRow(QObject::tr("安全裕度 (m)"), m_spinMargin);
     form->addRow(QObject::tr("视锥半角 (°)"), m_spinHalf);
     form->addRow(QObject::tr("高度过滤 zmax (m)"), m_spinZmax);
@@ -328,6 +357,25 @@ void FovLayer::setObstacleSource(int src)
 }
 
 // ---------- T3.4 planner 同口径 ----------
+namespace {
+
+// T3.4：档位 → (显示名, 配色)。配色刻意与告警红(220,38,38)拉开距离：
+//   直线=蓝灰 曲线=蓝 不绕行=紫 掉头=橙
+// 让"这一段按哪档在查"一眼可辨，同时不跟危险红框抢视觉优先级。
+struct SceneStyle { const char* tag; QColor color; };
+
+SceneStyle sceneStyle(blz::DriveScene s) {
+    switch (s) {
+        case blz::DriveScene::Straight:        return {"直",      QColor(100, 116, 139)};
+        case blz::DriveScene::Curve:           return {"弯",      QColor(37, 99, 235)};
+        case blz::DriveScene::CurveNoBypass:   return {"弯·不绕行", QColor(124, 58, 237)};
+        case blz::DriveScene::CurveTurnAround: return {"掉头",    QColor(217, 119, 6)};
+    }
+    return {"", QColor()};
+}
+
+}  // namespace
+
 void FovLayer::setPlannerMode(bool on)
 {
     m_plannerMode = on;
@@ -340,13 +388,7 @@ void FovLayer::setPlannerMode(bool on)
             : QString());
     }
     if (m_lblPlannerHint) {
-        m_lblPlannerHint->setText(on
-            ? QObject::tr("同口径：直线 %1m / 曲线 %2m / 不绕行 %3m / 掉头 %4m")
-                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Straight), 0, 'f', 2)
-                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Curve), 0, 'f', 2)
-                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveNoBypass), 0, 'f', 2)
-                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveTurnAround), 0, 'f', 2)
-            : QString());
+        m_lblPlannerHint->setText(on ? plannerHintText() : QString());
         m_lblPlannerHint->setVisible(on);
     }
     if (m_chkPlanner && m_chkPlanner->isChecked() != on) {
@@ -354,6 +396,39 @@ void FovLayer::setPlannerMode(bool on)
         m_chkPlanner->setChecked(on);
     }
     if (m_enabled) scheduleRecalc();
+}
+
+QString FovLayer::plannerHintText() const
+{
+    return QObject::tr("同口径四档：直线 %1m / 曲线 %2m / 不绕行 %3m / 掉头 %4m")
+        .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Straight), 0, 'f', 2)
+        .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Curve), 0, 'f', 2)
+        .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveNoBypass), 0, 'f', 2)
+        .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveTurnAround), 0, 'f', 2);
+}
+
+QString FovLayer::sceneBreakdownText() const
+{
+    if (!m_plannerMode) return QString();
+    struct Row { blz::DriveScene s; const char* name; };
+    const Row rows[] = {
+        {blz::DriveScene::Straight, "直线"},
+        {blz::DriveScene::Curve, "曲线"},
+        {blz::DriveScene::CurveNoBypass, "不绕行"},
+        {blz::DriveScene::CurveTurnAround, "掉头"},
+    };
+    QStringList parts;
+    for (const auto& r : rows) {
+        const int n = m_sceneCount[static_cast<int>(r.s)];
+        if (n <= 0) continue;
+        parts << QObject::tr("%1 %2点(%3m)").arg(QString::fromUtf8(r.name))
+                     .arg(n)
+                     .arg(blz::sceneFrontDist(m_limits, r.s), 0, 'f', 2);
+    }
+    // 四档全为 0 说明还没算过，不输出误导性文案
+    bool any = false;
+    for (int i = 0; i < 4; ++i) if (m_sceneCount[i] > 0) any = true;
+    return any ? parts.join(QStringLiteral(" · ")) : QString();
 }
 
 void FovLayer::setPlannerLimits(const blz::PlannerLimits& lim)
@@ -410,6 +485,8 @@ void FovLayer::recalcAll()
     int hits = 0;
     int totalPts = 0;
     double minHitDist = 1e18;
+    // T3.4：每轮重算都重新统计档位分布，拖点/改属性后立即反映
+    for (int i = 0; i < 4; ++i) m_sceneCount[i] = 0;
 
     constexpr double kHalfL = 1.85 * 0.5;   // 实车半长 0.925m
     constexpr double kHalfW = 1.50 * 0.5;   // 实车半宽 0.750m
@@ -475,8 +552,12 @@ void FovLayer::recalcAll()
                 flags.turnAround = attr->turnAround;
                 flags.bypass = attr->bypass;   // 反相语义在 pickScene 内处理
             }
+            blz::DriveScene scene = blz::DriveScene::Straight;
             if (m_plannerMode) {
-                frontDist = blz::frontDistForPoint(m_limits, flags);
+                scene = blz::pickScene(flags);
+                frontDist = blz::sceneFrontDist(m_limits, scene);
+                // 分档统计（汇总栏用）
+                ++m_sceneCount[static_cast<int>(scene)];
             }
             // 兜底：算出来 <= 0（参数错误/该场景被禁用）时退回界面值，
             // 避免"永不报警"这种静默失效。
@@ -498,6 +579,12 @@ void FovLayer::recalcAll()
             const double invRes = (m_resolution > 0.0) ? (1.0 / m_resolution) : 1.0;
 
             FovOverlayItem::Entry e;
+            // T3.4：把档位写进 entry，图上按档位配色 + 标注
+            if (m_plannerMode) {
+                const SceneStyle st = sceneStyle(scene);
+                e.sceneTag = QString::fromUtf8(st.tag);
+                e.sceneColor = st.color;
+            }
             if (m_rectMode) {
                 // 屏幕坐标系 y 向下：车体左侧(+y_world) 对应屏幕 -ly，右侧(-y_world) 对应屏幕 +ly
                 const double xMinPx = -(kHalfL + (forcePass ? 0.0 : m_margin)) * invRes;
@@ -607,19 +694,28 @@ void FovLayer::recalcAll()
 
     if (m_overlayGuard) m_overlayGuard->setEntries(entries);
     m_lastHitCount = hits;
+
+    // T3.4：把档位分布拼到汇总后面，让"属性到底生效没有"一眼可查。
+    // 旧模式（未分场景）为控字符串，不追加。
+    const QString breakdown = sceneBreakdownText();
+    const QString suffix = breakdown.isEmpty() ? QString()
+                                               : QStringLiteral("　｜　") + breakdown;
+
     if (m_lblSummary) {
         if (!primaryGrid || primaryGrid->width <= 0) {
-            m_lblSummary->setText(QObject::tr("尚未加载地图或 .pcd（仅显示检测框轮廓）"));
+            m_lblSummary->setText(QObject::tr("尚未加载地图或 .pcd（仅显示检测框轮廓）")
+                                  + suffix);
             m_lblSummary->setStyleSheet("color: #b45309; font-size: 12px;");
         } else if (hits > 0) {
             const QString distTxt = (minHitDist <= 0.01)
                 ? QObject::tr("存在车身擦碰!")
                 : QObject::tr("最近前视 %1m").arg(minHitDist < 1e17 ? minHitDist : 0.0, 0, 'f', 2);
             m_lblSummary->setText(QObject::tr("危险点：%1 / %2（%3）")
-                                      .arg(hits).arg(totalPts).arg(distTxt));
+                                      .arg(hits).arg(totalPts).arg(distTxt) + suffix);
             m_lblSummary->setStyleSheet("color: #dc2626; font-weight: bold; font-size: 12px;");
         } else {
-            m_lblSummary->setText(QObject::tr("全线 %1 个轨迹点净空安全（0 命中）").arg(totalPts));
+            m_lblSummary->setText(QObject::tr("全线 %1 个轨迹点净空安全（0 命中）")
+                                      .arg(totalPts) + suffix);
             m_lblSummary->setStyleSheet("color: #15803d; font-weight: bold; font-size: 12px;");
         }
     }

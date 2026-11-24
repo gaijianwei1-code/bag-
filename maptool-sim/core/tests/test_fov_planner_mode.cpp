@@ -25,8 +25,8 @@ int main(int argc, char** argv) {
 
     auto* layer = new FovLayer;
 
-    // ---- 1. 默认关闭同口径（不改变既有行为）----
-    CHECK(!layer->plannerMode(), "默认不同口径，保持旧行为");
+    // ---- 1. 默认开启同口径（前视距离本来就该跟随轨迹属性）----
+    CHECK(layer->plannerMode(), "默认开启分档（旧行为需手动关）");
 
     // ---- 2. 默认 limits 与用户给的参数一致 ----
     {
@@ -102,6 +102,15 @@ int main(int argc, char** argv) {
         // 场景距离为 0，调用方（fov_layer）会用界面值兜底；这里验证算出的是 0
         CHECK(near(layer->frontDistForScene(blz::DriveScene::Straight), 0.0),
               "非法参数算出 0（由调用方兜底）");
+    }
+
+    // ---- 8. 档位统计接口（界面汇总栏用）----
+    {
+        layer->setPlannerMode(true);
+        CHECK(layer->scenePointCount(blz::DriveScene::Straight) == 0,
+              "未重算前档位计数为 0（不输出误导文案）");
+        CHECK(layer->sceneBreakdownText().isEmpty(),
+              "无数据时不生成档位分布文案");
     }
 
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
