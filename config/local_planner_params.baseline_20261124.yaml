@@ -1,0 +1,42 @@
+# B 线默认 PursuitLocalPlanner 参数（2026-11-24 用户给定，作为对齐基准）
+#
+# 这份文件的 collision_time_* 是 **L0 前视距离的唯一来源**：
+#   L0 检测距离 = 0.4 m/s × collision_time_*（见 core/planner_limits.cpp）
+# 改这里之前先读 docs/T3.4_planner_front_dist.md，
+# 尤其注意「bypass=1 表示不允许绕行」这条反相语义。
+
+PursuitLocalPlanner:
+  goal_dist_tol: 0.5 #1.0
+  min_turning_radius: 0.85 #0.95 #L=1.11, jiaodu=45, r=1.11
+  robot_wheelbase: 0.952 #0.865
+  fast_linear_vel: 0.4 # vehicle speed
+  low_linear_vel: 0.4
+  lookahead_dist: 1.5
+  min_lookahead_dist: 1.0
+  max_lookahead_dist: 4.0
+  lookahead_time: 3.0
+  transform_tolerance: 0.2
+  use_velocity_scaled_lookahead_dist: true
+  min_approach_linear_velocity: 0.05
+  max_allowed_time_to_collision: 3.5 #3.5
+  use_regulated_linear_velocity_scaling: true
+  use_cost_regulated_linear_velocity_scaling: false
+  cost_scaling_dist: 0.6 #0.6
+  cost_scaling_gain: 1.0
+  inflation_cost_scaling_factor: 3.0
+  regulated_linear_scaling_min_radius: 3.0
+  regulated_linear_scaling_min_speed: 0.25
+  use_rotate_to_heading: false
+  max_angular_accel: 3.2
+  allow_reversing: false
+  controller_frequency: 10.0
+  max_attempts_curve: 2  # 2
+  max_attempts_straight: 4 # 4
+   # 多场景碰撞检测距离参数
+   # ⚠️ 实际距离 = collision_linear_vel(硬编码 0.4) × 下列秒数
+  collision_time_straight: 3.0           # 直线：1.20 m
+  collision_time_curve: 2.0              # 曲线：0.80 m
+  collision_time_curve_no_bypass: 2.0    # 不绕行：0.80 m
+  collision_time_curve_turn_around: 1.0  # 掉头：0.40 m
+
+  enable_collision_check: true

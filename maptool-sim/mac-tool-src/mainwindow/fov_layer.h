@@ -15,6 +15,9 @@
 #include <QPolygonF>
 #include <QPointer>
 
+// T3.4：PlannerLimits 值成员（fov_layer 按点取检测距离），需要完整定义
+#include "../../core/planner_limits.h"
+
 class BQGraphicsScene;
 class BPathItem;
 class QDockWidget;
@@ -22,6 +25,7 @@ class QDoubleSpinBox;
 class QComboBox;
 class QLabel;
 class QToolButton;
+class QCheckBox;
 class QMainWindow;
 class QTimer;
 
@@ -100,6 +104,14 @@ public slots:
     void setRectMode(bool on);  // true=实车1.85×1.50m矩形检测，false=旧版扇形视锥
     void setSafetyMargin(double v); // 实车矩形单侧安全裕度（对应 costmap 膨胀半径，默认 0.25m）
     void setObstacleSource(int src); // 0=修过的地图(.pgm), 1=原始点云(.pcd), 2=PGM∩PCD交集
+    // T3.4：前视距离改为与 PursuitLocalPlanner 同口径（0.4 × collision_time 分场景）。
+    // 打开后 m_front_dist 退化为"未匹配场景时的兜底值"，实际每个点按自身属性取距离。
+    void setPlannerMode(bool on);
+    void setPlannerLimits(const blz::PlannerLimits& lim);
+    const blz::PlannerLimits& plannerLimits() const { return m_limits; }
+    bool plannerMode() const { return m_plannerMode; }
+    // 冒烟用：某场景当前生效的检测距离（米）
+    double frontDistForScene(blz::DriveScene s) const;
 
 signals:
     void recalculated(int hitCount);   // 重算完成（冒烟断言用）
@@ -125,6 +137,9 @@ private:
     double m_half_angle_deg = 30.0;
     double m_zmax = 2.0;
     double m_margin = 0.25;     // 实车矩形单侧安全裕度（对应 costmap 膨胀，默认 0.25m）
+    // T3.4：planner 同口径模式。关闭时沿用固定 m_front_dist（兼容旧行为）。
+    bool m_plannerMode = false;
+    blz::PlannerLimits m_limits;
     int m_obstacleSource = SourcePgm; // 默认优先用修过的地图 (.pgm)，无 pgm 时自动退回 .pcd
     bool m_rectMode = true;     // 默认实车矩形净空检测（1.85×1.50m + 前视框）
     bool m_enabled = false;
@@ -142,6 +157,8 @@ private:
     QComboBox* m_comboSource = nullptr;
     QComboBox* m_comboMode = nullptr;
     QDoubleSpinBox* m_spinFront = nullptr;
+    QCheckBox* m_chkPlanner = nullptr;      // T3.4 按 planner 场景取距离
+    QLabel* m_lblPlannerHint = nullptr;
     QDoubleSpinBox* m_spinMargin = nullptr;
     QDoubleSpinBox* m_spinHalf = nullptr;
     QDoubleSpinBox* m_spinZmax = nullptr;

@@ -2,10 +2,16 @@
 #include "ui_mainwindow.h"
 
 #include "../../core/grid_projection.h"   //T1.5: pcd 加载/投影
+#include "../../core/planner_limits.h"    //T3.4: 前视距离对齐 planner
 
 #include <QDockWidget>
 #include <QAction>
 #include <QMenuBar>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QSettings>
+#include <QStatusBar>
 
 #include <iomanip>     // std::setprecision —— MSVC 会通过其它头文件顺带引入，
                        // 但 GCC/Clang（macOS）不会，必须显式包含
@@ -84,6 +90,41 @@ MainWindow::MainWindow(QWidget *parent)
         QDockWidget* fovDock = fovLayer->createControlDock(this);
         addDockWidget(Qt::RightDockWidgetArea, fovDock);
         fovDock->hide();    //默认隐藏，避免改变现有布局；需要时从"窗口"里唤出
+
+        //===== T3.4 前视距离对齐 planner =====
+        // 优先用场地向导/本地文件里的 local_planner_params.yaml 覆盖内置默认值，
+        // 找不到就沿用 core 里的默认（与你给的默认参数一致），并在状态栏提示。
+        {
+            QString yamlPath = QSettings().value("plannerParamsPath").toString();
+            if (yamlPath.isEmpty() || !QFileInfo::exists(yamlPath)) {
+                // 常见位置兜底探测
+                const QStringList cands = {
+                    QDir::current().filePath("local_planner_params.yaml"),
+                    QDir::home().filePath("planner/local_planner_params.yaml"),
+                };
+                for (const QString& c : cands) {
+                    if (QFileInfo::exists(c)) { yamlPath = c; break; }
+                }
+            }
+            blz::PlannerLimits lim;
+            if (!yamlPath.isEmpty() && QFileInfo::exists(yamlPath)) {
+                QFile f(yamlPath);
+                if (f.open(QIODevice::ReadOnly)) {
+                    const QByteArray txt = f.readAll();
+                    const int n = blz::parsePlannerLimits(txt.constData(), lim);
+                    QSettings().setValue("plannerParamsPath", yamlPath);
+                    statusBar()->showMessage(
+                        tr("前视距离已读取 planner 参数：%1（命中 %2 项）")
+                            .arg(QFileInfo(yamlPath).fileName()).arg(n), 8000);
+                }
+            } else {
+                statusBar()->showMessage(
+                    tr("未找到 local_planner_params.yaml，前视距离用内置默认"
+                       "（直线1.2 / 曲线0.8 / 不绕行0.8 / 掉头0.4 m）"), 8000);
+            }
+            fovLayer->setPlannerLimits(lim);
+        }
+        //===== T3.4 接线结束 =====
         connect(fovToggle, &QAction::toggled, fovDock, &QDockWidget::setVisible);
         connect(fovDock, &QDockWidget::visibilityChanged, fovToggle, &QAction::setChecked);
         connect(fovLayer, &FovLayer::zmaxChanged, this, [this](double v) {

@@ -20,6 +20,8 @@
 #include <QWidget>
 #include <QMainWindow>
 #include <QTimer>
+#include <QCheckBox>
+#include <QSignalBlocker>
 #include <QtMath>
 #include <QDebug>
 #include <algorithm>
@@ -27,6 +29,7 @@
 #include "../items/GraphicsType.h"     // BPathItem / BPointItem / BQGraphicsScene
 #include "../../core/grid_projection.h"
 #include "../../core/fov_raycast.h"
+#include "../../core/planner_limits.h"
 
 // ================= FovOverlayItem =================
 
@@ -220,9 +223,23 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
     m_spinHalf   = mkSpin(1.0, 89.0, 5.0, m_half_angle_deg);
     m_spinHalf->setEnabled(!m_rectMode);
     m_spinZmax   = mkSpin(0.0, 30.0, 0.5, m_zmax);
-
     form->addRow(QObject::tr("障碍源"), m_comboSource);
     form->addRow(QObject::tr("检测模式"), m_comboMode);
+
+    // T3.4：前视距离来源切换
+    m_chkPlanner = new QCheckBox(QObject::tr("按 planner 分场景（0.4×collision_time）"));
+    m_chkPlanner->setToolTip(QObject::tr(
+        "开启后前视检测距离与 PursuitLocalPlanner 的碰撞检测完全同口径：\n"
+        "距离 = 0.4 m/s × collision_time_*，按轨迹点的 curve_paths / turnAround /\n"
+        "bypass 属性分四档。此时「前视距离」输入框仅作兜底。\n"
+        "注意 bypass=1 在工程里表示「不允许绕行」。"));
+    form->addRow(QString(), m_chkPlanner);
+    m_lblPlannerHint = new QLabel;
+    m_lblPlannerHint->setStyleSheet("color:#6b7280; font-size:11px;");
+    m_lblPlannerHint->setWordWrap(true);
+    m_lblPlannerHint->setVisible(false);
+    form->addRow(QString(), m_lblPlannerHint);
+
     form->addRow(QObject::tr("前视距离 (m)"), m_spinFront);
     form->addRow(QObject::tr("安全裕度 (m)"), m_spinMargin);
     form->addRow(QObject::tr("视锥半角 (°)"), m_spinHalf);
@@ -258,6 +275,8 @@ QDockWidget* FovLayer::createControlDock(QMainWindow* win)
             this, &FovLayer::setHalfAngleDeg);
     connect(m_spinZmax, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &FovLayer::setZmax);
+    connect(m_chkPlanner, &QCheckBox::toggled, this, &FovLayer::setPlannerMode);
+
     connect(m_btnToggle, &QToolButton::toggled, this, [this](bool on) {
         setEnabled(on);
         m_btnToggle->setText(on ? QObject::tr("前视快算：开") : QObject::tr("前视快算：关"));
@@ -306,6 +325,54 @@ void FovLayer::setObstacleSource(int src)
 {
     m_obstacleSource = src;
     if (m_enabled) scheduleRecalc();
+}
+
+// ---------- T3.4 planner 同口径 ----------
+void FovLayer::setPlannerMode(bool on)
+{
+    m_plannerMode = on;
+    if (m_spinFront) {
+        // 同口径下界面值不再直接生效，明确告知，避免"改了没反应"的困惑
+        m_spinFront->setEnabled(!on);
+        m_spinFront->setToolTip(on
+            ? QObject::tr("planner 同口径模式：距离=0.4 m/s × collision_time，"
+                          "按轨迹点属性分四档（直线/曲线/不绕行/掉头），此值仅作兜底")
+            : QString());
+    }
+    if (m_lblPlannerHint) {
+        m_lblPlannerHint->setText(on
+            ? QObject::tr("同口径：直线 %1m / 曲线 %2m / 不绕行 %3m / 掉头 %4m")
+                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Straight), 0, 'f', 2)
+                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Curve), 0, 'f', 2)
+                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveNoBypass), 0, 'f', 2)
+                  .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveTurnAround), 0, 'f', 2)
+            : QString());
+        m_lblPlannerHint->setVisible(on);
+    }
+    if (m_chkPlanner && m_chkPlanner->isChecked() != on) {
+        QSignalBlocker block(m_chkPlanner);
+        m_chkPlanner->setChecked(on);
+    }
+    if (m_enabled) scheduleRecalc();
+}
+
+void FovLayer::setPlannerLimits(const blz::PlannerLimits& lim)
+{
+    m_limits = lim;
+    if (m_lblPlannerHint && m_plannerMode) {
+        m_lblPlannerHint->setText(
+            QObject::tr("同口径：直线 %1m / 曲线 %2m / 不绕行 %3m / 掉头 %4m")
+                .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Straight), 0, 'f', 2)
+                .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::Curve), 0, 'f', 2)
+                .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveNoBypass), 0, 'f', 2)
+                .arg(blz::sceneFrontDist(m_limits, blz::DriveScene::CurveTurnAround), 0, 'f', 2));
+    }
+    if (m_enabled && m_plannerMode) scheduleRecalc();
+}
+
+double FovLayer::frontDistForScene(blz::DriveScene s) const
+{
+    return blz::sceneFrontDist(m_limits, s);
 }
 
 void FovLayer::scheduleRecalc()
@@ -397,6 +464,24 @@ void FovLayer::recalcAll()
                 leftMargin = 0.0;    // 左贴边：左侧贴边裁剪
             }
 
+            // T3.4：前视距离。planner 同口径模式下按该点的路段属性取
+            // 0.4 × collision_time（直线/曲线/不绕行/掉头四档），
+            // 与 pursuit_local_planner.cpp 的碰撞检测距离完全一致；
+            // 关闭时沿用旧的固定 m_front_dist。
+            blz::PointFlags flags;
+            double frontDist = m_front_dist;
+            if (auto* attr = pt->attr) {
+                flags.curve_paths = attr->curve_paths;
+                flags.turnAround = attr->turnAround;
+                flags.bypass = attr->bypass;   // 反相语义在 pickScene 内处理
+            }
+            if (m_plannerMode) {
+                frontDist = blz::frontDistForPoint(m_limits, flags);
+            }
+            // 兜底：算出来 <= 0（参数错误/该场景被禁用）时退回界面值，
+            // 避免"永不报警"这种静默失效。
+            if (!(frontDist > 0.0)) frontDist = m_front_dist;
+
             // 实时按相邻轨迹点重算切线朝向（拖动轨迹点后红框立即随弯旋转）
             qreal yaw = pt->yaw();
             if (n >= 2) {
@@ -416,7 +501,7 @@ void FovLayer::recalcAll()
             if (m_rectMode) {
                 // 屏幕坐标系 y 向下：车体左侧(+y_world) 对应屏幕 -ly，右侧(-y_world) 对应屏幕 +ly
                 const double xMinPx = -(kHalfL + (forcePass ? 0.0 : m_margin)) * invRes;
-                const double xMaxPx = (kHalfL + m_front_dist) * invRes;
+                const double xMaxPx = (kHalfL + frontDist) * invRes;
                 const double leftPx  = (kHalfW + leftMargin) * invRes;
                 const double rightPx = (kHalfW + rightMargin) * invRes;
                 auto rot = [&](double lx, double ly) {
@@ -432,7 +517,7 @@ void FovLayer::recalcAll()
                 QPolygonF sector;
                 sector << pix;
                 const qreal a0 = screenYaw - rad, a1 = screenYaw + rad;
-                const qreal reach = m_front_dist * invRes;
+                const qreal reach = frontDist * invRes;
                 for (int k = 0; k <= 16; ++k) {
                     const qreal a = a0 + (a1 - a0) * k / 16.0;
                     sector << pix + QPointF(reach * std::cos(a), reach * std::sin(a));
@@ -453,7 +538,7 @@ void FovLayer::recalcAll()
                 if (m_rectMode) {
                     blz::RectParams rp;
                     rp.x_min = -(kHalfL + (forcePass ? 0.0 : m_margin));
-                    rp.x_max = kHalfL + m_front_dist;
+                    rp.x_max = kHalfL + frontDist;
                     rp.y_min = -(kHalfW + rightMargin);
                     rp.y_max =  (kHalfW + leftMargin);
                     rp.max_hits = 48;
@@ -461,9 +546,9 @@ void FovLayer::recalcAll()
                     res = blz::cast_rect(*primaryGrid, wx, wy, yaw, rp);
                 } else {
                     blz::FovParams fp;
-                    fp.front_dist = m_front_dist;
+                    fp.front_dist = frontDist;
                     fp.half_angle = rad;
-                    fp.hit_dist_max = std::max(m_front_dist, 3.0);
+                    fp.hit_dist_max = std::max(frontDist, 3.0);
                     res = blz::cast_fov(*primaryGrid, wx, wy, yaw, fp);
                 }
 

@@ -73,6 +73,7 @@ set(SOURCES
     mainwindow/venue_wizard.cpp
     ../../maptool-sim/core/grid_projection.cpp
     ../../maptool-sim/core/fov_raycast.cpp
+    ../../maptool-sim/core/planner_limits.cpp
     items/mapSelectItem.cpp
     items/startRect.cpp
 )

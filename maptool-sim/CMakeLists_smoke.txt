@@ -11,12 +11,18 @@ add_executable(test_core core/tests/test_core.cpp
                          core/fov_raycast.cpp)
 target_include_directories(test_core PRIVATE core)
 
+# ---- T3.4 前视距离与 planner 同口径（纯算术，无 Qt）----
+add_executable(test_planner_limits core/tests/test_planner_limits.cpp
+                                   core/planner_limits.cpp)
+target_include_directories(test_planner_limits PRIVATE core)
+
 # ---- T1.5 UI 集成冒烟 ----
 set(CMAKE_AUTOMOC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 add_executable(test_ui_integration core/tests/test_ui_integration.cpp
                                   core/grid_projection.cpp
                                   core/fov_raycast.cpp
+                                  core/planner_limits.cpp
                                   mac-tool-src/mainwindow/fov_layer.cpp
                                   mac-tool-src/items/GraphicsType.cpp
                                   mac-tool-src/dialog/attributeAddDialog.cpp)
@@ -28,10 +34,23 @@ target_include_directories(test_ui_integration PRIVATE
     mac-tool-src/dialog)
 target_link_libraries(test_ui_integration Qt6::Core Qt6::Gui Qt6::Widgets)
 
+# ---- T3.4 前视距离同口径（FovLayer 集成层）----
+add_executable(test_fov_planner_mode core/tests/test_fov_planner_mode.cpp
+                                   core/grid_projection.cpp
+                                   core/fov_raycast.cpp
+                                   core/planner_limits.cpp
+                                   mac-tool-src/mainwindow/fov_layer.cpp
+                                   mac-tool-src/items/GraphicsType.cpp
+                                   mac-tool-src/dialog/attributeAddDialog.cpp)
+target_include_directories(test_fov_planner_mode PRIVATE
+    core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
+target_link_libraries(test_fov_planner_mode Qt6::Core Qt6::Gui Qt6::Widgets)
+
 # ---- T1.5 bugfix 回归（场景 clear 悬垂 / z 值遮挡）----
 add_executable(test_fov_regression core/tests/test_fov_regression.cpp
                                   core/grid_projection.cpp
                                   core/fov_raycast.cpp
+                                  core/planner_limits.cpp
                                   mac-tool-src/mainwindow/fov_layer.cpp
                                   mac-tool-src/items/GraphicsType.cpp
                                   mac-tool-src/dialog/attributeAddDialog.cpp)
@@ -44,6 +63,7 @@ find_package(Qt6 REQUIRED COMPONENTS Network WebSockets)
 add_executable(test_live_layer core/tests/test_live_layer.cpp
                               core/grid_projection.cpp
                               core/fov_raycast.cpp
+                              core/planner_limits.cpp
                               mac-tool-src/mainwindow/fov_layer.cpp
                               mac-tool-src/mainwindow/live_layer.cpp
                               mac-tool-src/items/GraphicsType.cpp
@@ -56,6 +76,7 @@ target_link_libraries(test_live_layer Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Netwo
 add_executable(test_live_ws core/tests/test_live_ws.cpp
                               core/grid_projection.cpp
                               core/fov_raycast.cpp
+                              core/planner_limits.cpp
                               mac-tool-src/mainwindow/fov_layer.cpp
                               mac-tool-src/mainwindow/live_layer.cpp
                               mac-tool-src/items/GraphicsType.cpp
