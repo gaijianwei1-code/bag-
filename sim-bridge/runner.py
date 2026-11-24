@@ -12,6 +12,7 @@ bag_replay.py 接口：
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -31,12 +32,170 @@ class RunError(Exception):
 
 
 def _exec(cmd, timeout=120, check=True):
+    # 关键（2026-11-24 事故）：docker exec 启动的子进程必须随调用方一起被干掉。
+    # 否则 bridge 或上游超时退出后，容器内 roslaunch/rosbag record 会变成孤儿，
+    # 继续写盘直到撑爆磁盘（w16_baseline 曾写满 373 GB）。
     p = subprocess.run(["docker", "exec", CONTAINER, "bash", "-lc", cmd],
                        capture_output=True, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RunError("CONTAINER_CMD_FAILED",
                        f"{cmd[:120]} -> rc={p.returncode}: {p.stderr[-400:]}")
     return p.returncode, p.stdout, p.stderr
+
+
+# ---------- 0. 仿真进程与磁盘卫生（2026-11-24 事故修复） ----------
+# 事故：2026-11-22 15:01 起的 rosbag record 未随 run 结束退出，
+# 连续写 5 天把 runs/BLINE/w16_baseline/evidence.bag 涨到 373 GB，
+# Docker.raw 撑到 608 GB，主机仅剩 23 GiB。
+# 铁律：任何 run 开跑前、结束后都必须清掉上一轮遗留的仿真进程。
+
+_STALE_PATTERNS = (
+    "/opt/ros/noetic/lib/rosbag/record",
+    "/opt/ros/noetic/bin/rosbag record",
+    "devel/lib/roscpp/sim_clock.py",
+    "devel/lib/roscpp/virtual_lidar.py",
+    "devel/lib/roscpp/fake_chassis.py",
+    "sim/scripts/live_bridge.py",
+    "sim/scripts/lookahead_observer.py",
+    "devel/lib/sweep_base/sweep_base_node",
+    "bag_replay.py",
+    "b_line_run.py",
+    "roslaunch",
+    "rosmaster",
+)
+
+
+def kill_stale_sim_procs(scope="all"):
+    """强制终止容器内遗留的录包进程与孤儿仿真节点。
+
+    scope='all'    : 连 roslaunch/rosmaster 一起清（开跑前、无活跃 run 时用）
+    scope='record' : 只杀 rosbag record（run 结束后收尾用，不动 ROS 主节点）
+    """
+    pats = (_STALE_PATTERNS if scope == "all" else
+            ("/opt/ros/noetic/lib/rosbag/record", "/opt/ros/noetic/bin/rosbag record"))
+    cmds = " ; ".join(f"pkill -9 -f {shlex.quote(p)}" for p in pats)
+    _exec(cmds + " ; true", timeout=30, check=False)
+
+
+def guard_run_bag_size(max_gb=20.0):
+    """守护：任何单个 evidence.bag 超过 max_gb 就立刻杀掉录包进程。
+
+    这是最后一道防线。正常 B 线 run 的 evidence.bag 应在 1–3 GB；
+    超过 20 GB 意味着 record 失控（如 w16_baseline 事件）。
+    返回 {"killed": bool, "oversized": [{path, gb}]}
+    """
+    script = (
+        "import json, os\n"
+        f"roots = ['{WS_IN_CONTAINER}/runs/BLINE', '{WS_IN_CONTAINER}/runs/BAG_REPLAY']\n"
+        f"limit = {float(max_gb)} * 1024**3\n"
+        "bad = []\n"
+        "for root in roots:\n"
+        "    if not os.path.isdir(root): continue\n"
+        "    for name in os.listdir(root):\n"
+        "        p = os.path.join(root, name)\n"
+        "        if not os.path.isdir(p): continue\n"
+        "        fb = os.path.join(p, 'evidence.bag')\n"
+        "        try:\n"
+        "            s = os.path.getsize(fb)\n"
+        "        except OSError: continue\n"
+        "        if s > limit: bad.append({'path': fb, 'bytes': s})\n"
+        "print(json.dumps({'oversized': bad}))\n"
+    )
+    rc, out, _ = _exec(f"python3 -c {shlex.quote(script)}", timeout=60, check=False)
+    oversized = []
+    for line in reversed((out or "").splitlines()):
+        if line.strip().startswith("{"):
+            try:
+                oversized = json.loads(line).get("oversized") or []
+                break
+            except ValueError:
+                continue
+    if oversized:
+        # 超限 → 立即停掉所有录包，防止继续写盘
+        kill_stale_sim_procs("record")
+    return {"killed": bool(oversized),
+            "oversized": [{"path": it["path"],
+                           "gb": round(it["bytes"] / 1024**3, 1)} for it in oversized]}
+
+
+def container_free_gb():
+    """容器根分区剩余空间（GiB）。"""
+    rc, out, _ = _exec("df -B1 / | awk 'NR==2{print $4}'", timeout=15, check=False)
+    try:
+        return int(out.strip()) / (1024.0 ** 3)
+    except (ValueError, AttributeError):
+        return -1.0
+
+
+def prune_old_runs(keep_recent=6, keep_days=3, min_free_gb=30.0, dry_run=False):
+    """删掉过期 run 产物，回摄 Docker.raw 空间。
+
+    保护：
+      · 最近 keep_recent 个 run 目录永不删
+      · 修改时间在 keep_days 天内的不删
+      · 磁盘已充足（>= min_free_gb）且未强制时，只做轻度清理（丢 evidence.bag）
+    """
+    script = (
+        "import json, os, shutil, time\n"
+        f"roots = {{'BLINE': {WS_IN_CONTAINER!r} + '/runs/BLINE',\n"
+        f"         'BAG_REPLAY': {WS_IN_CONTAINER!r} + '/runs/BAG_REPLAY',\n"
+        f"         'ALINE': {WS_IN_CONTAINER!r} + '/runs/ALINE'}}\n"
+        f"keep_recent = {int(keep_recent)}\n"
+        f"keep_days = {float(keep_days)}\n"
+        f"dry = {bool(dry_run)}\n"
+        "cutoff = time.time() - keep_days * 86400.0\n"
+        "freed = 0\n"
+        "removed = []\n"
+        "for label, root in roots.items():\n"
+        "    if not os.path.isdir(root):\n"
+        "        continue\n"
+        "    ents = []\n"
+        "    for name in os.listdir(root):\n"
+        "        p = os.path.join(root, name)\n"
+        "        if os.path.isdir(p):\n"
+        "            ents.append((os.path.getmtime(p), name, p))\n"
+        "    ents.sort(reverse=True)\n"
+        "    for idx, (mt, name, p) in enumerate(ents):\n"
+        "        if idx < keep_recent or mt >= cutoff:\n"
+        "            continue\n"
+        "        sz = 0\n"
+        "        for dp, _, fns in os.walk(p):\n"
+        "            for fn in fns:\n"
+        "                try:\n"
+        "                    sz += os.path.getsize(os.path.join(dp, fn))\n"
+        "                except OSError:\n"
+        "                    pass\n"
+        "        if not dry:\n"
+        "            shutil.rmtree(p, ignore_errors=True)\n"
+        "        freed += sz\n"
+        "        removed.append({'kind': label, 'name': name, 'bytes': sz})\n"
+        "print(json.dumps({'freed_bytes': freed, 'removed': removed[:40],\n"
+        "                  'removed_count': len(removed), 'dry_run': dry}, ensure_ascii=False))\n"
+    )
+    rc, out, err = _exec(f"python3 -c {shlex.quote(script)}", timeout=180, check=False)
+    data = None
+    for line in reversed((out or "").splitlines()):
+        if line.strip().startswith("{"):
+            try:
+                data = json.loads(line)
+                break
+            except ValueError:
+                continue
+    if data is None:
+        raise RunError("PRUNE_FAILED", (err or out or "")[-300:])
+    data["free_gb_after"] = round(container_free_gb(), 1)
+    return data
+
+
+def preflight(skip_prune=False):
+    """开跑前体检：清遗留进程 + 磁盘不够就修剪旧 run。"""
+    kill_stale_sim_procs("all")
+    free = container_free_gb()
+    pruned = None
+    if not skip_prune and (free < 30.0 or free < 0):
+        pruned = prune_old_runs(keep_recent=6, keep_days=3, min_free_gb=30.0)
+    return {"free_gb_before": round(free, 1), "pruned": pruned,
+            "disk_guard": guard_run_bag_size()}
 
 
 # ---------- 1. 初始位姿：从 bag 自动提取 ----------
@@ -496,6 +655,9 @@ def submit(venue, req, run_id, on_status=None):
     if not bag:
         raise RunError("VENUE_CONTAINER_PATHS_MISSING", "缺 container.bag")
 
+    status("queued", 0.02, "清理上一轮遗留仿真进程 / 检查磁盘")
+    preflight_info = preflight()
+
     status("queued", 0.05, "从 bag 提取初始位姿")
     init_pose = extract_init_pose(bag)
 
@@ -547,7 +709,6 @@ def submit(venue, req, run_id, on_status=None):
                     check=True, capture_output=True)
 
         # T4.2 补丁：b_line_run.py 的 wrapper launch 路径若漏传 initial_x/y/yaw，自动补齐
-        import shlex
         patch_py = (
             "import os\n"
             "anchor = '        fh.write(\\'    <arg name=\"bag\" value=\"%s\" />\\\\n\\' % _xml(recorded_bag))'\n"
@@ -577,6 +738,11 @@ def submit(venue, req, run_id, on_status=None):
         if rc != 0:
             raise RunError("REPLAY_FAILED", f"rc={rc}: {err[-600:]}")
 
+        # 收尾第一件事：先把录包与节点停干净，再读指标。
+        # 否则 record 会在 _read_result / 上报阶段继续写盘。
+        kill_stale_sim_procs("all")
+        disk_guard = guard_run_bag_size()
+
         status("analyzing", 0.85, "读取指标")
         record = _read_result(run_id)
         status("done", 1.0, "完成")
@@ -587,11 +753,16 @@ def submit(venue, req, run_id, on_status=None):
                 "param_set_id": param_meta.get("param_set_id") or candidate_ps,
                 "param_changes": param_meta.get("changes", []),
                 "param_plan": param_meta.get("param_plan", []),
-                "segment_info": segment_info}
+                "segment_info": segment_info,
+                "preflight": preflight_info,
+                "disk_guard": disk_guard}
     finally:
         # ps_{run_id} 参数集副本持久化保留用于追溯对比；仅清理临时 .tmp_ 前缀目录
         if tmp_ps and tmp_ps.startswith(".tmp_"):
             _cleanup_param_set(tmp_ps)
+        # 铁律（2026-11-24 事故）：无论成功、失败、超时还是抛异常，
+        # 必须杀掉本轮残留的 rosbag record 与仿真节点，否则会持续写盘到撑爆磁盘。
+        kill_stale_sim_procs("all")
         cleanup_worktree(wt)
 
 

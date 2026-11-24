@@ -245,6 +245,82 @@ def _check(venue: dict) -> None:
         raise HTTPException(422, str(e))
 
 
+# ---------- 磁盘卫生（2026-11-24 事故修复：录包失控写 373 GB） ----------
+@app.get("/disk")
+def disk_report(x_bridge_token: Optional[str] = Header(None)):
+    """容器磁盘与 runs 占用快览（给 UI 显示 + 提醒清理）。"""
+    _auth(x_bridge_token)
+    import shlex as _shlex
+    py = (
+        "import json, os, shutil\n"
+        f"ws = {os.environ.get('SIM_WS_DIR', '/root/catkin_ws')!r}\n"
+        "tot, used, free = shutil.disk_usage('/')\n"
+        "buckets = {}\n"
+        "for label in ('BLINE', 'BAG_REPLAY', 'ALINE'):\n"
+        "    root = os.path.join(ws, 'runs', label)\n"
+        "    if not os.path.isdir(root):\n"
+        "        buckets[label] = {'bytes': 0, 'runs': 0}; continue\n"
+        "    sz = 0; n = 0\n"
+        "    for name in os.listdir(root):\n"
+        "        p = os.path.join(root, name)\n"
+        "        if not os.path.isdir(p): continue\n"
+        "        n += 1\n"
+        "        for dp, _, fns in os.walk(p):\n"
+        "            for fn in fns:\n"
+        "                try: sz += os.path.getsize(os.path.join(dp, fn))\n"
+        "                except OSError: pass\n"
+        "    buckets[label] = {'bytes': sz, 'runs': n}\n"
+        "big = []\n"
+        "for label, root in (('BLINE', ws+'/runs/BLINE'), ('BAG_REPLAY', ws+'/runs/BAG_REPLAY')):\n"
+        "    if not os.path.isdir(root): continue\n"
+        "    for dp, _, fns in os.walk(root):\n"
+        "        for fn in fns:\n"
+        "            if not fn.endswith('.bag'): continue\n"
+        "            fp = os.path.join(dp, fn)\n"
+        "            try: s = os.path.getsize(fp)\n"
+        "            except OSError: continue\n"
+        "            if s > 2 * 1024**3:\n"
+        "                big.append({'path': fp, 'bytes': s})\n"
+        "big.sort(key=lambda x: -x['bytes'])\n"
+        "print(json.dumps({'total_bytes': tot, 'used_bytes': used, 'free_bytes': free,\n"
+        "  'free_gb': round(free / 1024**3, 1), 'buckets': buckets, 'big_bags': big[:10]},\n"
+        "  ensure_ascii=False))\n"
+    )
+    import subprocess as _sp
+    try:
+        p = _sp.run(["docker", "exec", os.environ.get("SIM_CONTAINER", "roboneo-sim"),
+                     "python3", "-c", py], capture_output=True, text=True, timeout=60)
+        if p.returncode == 0 and p.stdout.strip():
+            return json.loads(p.stdout.strip().splitlines()[-1])
+        raise HTTPException(500, (p.stderr or "")[-300:])
+    except _sp.TimeoutExpired:
+        raise HTTPException(504, "扫描磁盘超时")
+
+
+@app.post("/disk/kill-stale")
+def disk_kill_stale(x_bridge_token: Optional[str] = Header(None)):
+    """强制终止容器内遗留的 rosbag record 与孤儿仿真节点。"""
+    _auth(x_bridge_token)
+    import runner
+    before = runner.container_free_gb()
+    runner.kill_stale_sim_procs("all")
+    return {"ok": True, "free_gb_before": round(before, 1),
+            "free_gb_after": round(runner.container_free_gb(), 1)}
+
+
+@app.post("/disk/prune")
+def disk_prune(body: Optional[dict] = None, x_bridge_token: Optional[str] = Header(None)):
+    """删除过期 run 产物回收空间。body: {keep_recent, keep_days, dry_run}"""
+    _auth(x_bridge_token)
+    import runner
+    b = body or {}
+    return runner.prune_old_runs(
+        keep_recent=int(b.get("keep_recent", 6)),
+        keep_days=float(b.get("keep_days", 3)),
+        dry_run=bool(b.get("dry_run", False)),
+    )
+
+
 # ---------- runs ----------
 class RunRequest(BaseModel):
     venue_id: str
@@ -390,6 +466,17 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                 r = _runs.get(run_id)
                 if r:
                     r["live_stderr_tail"] = live.stderr_tail()[-5:]
+        # 2026-11-24 事故：run 结束必须清掉本轮的 rosbag record / 仿真节点，
+        # 否则会像 w16_baseline 那样在后台持续写盘把磁盘撑爆。
+        try:
+            import runner as _r
+            _r.kill_stale_sim_procs("all")
+            with _runs_lock:
+                r = _runs.get(run_id)
+                if r:
+                    r["free_gb_after"] = round(_r.container_free_gb(), 1)
+        except Exception:  # noqa: BLE001
+            pass
         _persist_run(run_id)
 
 
