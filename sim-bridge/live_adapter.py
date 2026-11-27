@@ -17,6 +17,10 @@ live_bridge 每行一条 JSON：
 """
 import math
 
+from planner_limits import (PlannerLimits, TrajectorySceneMatcher,
+                            compute_lookahead_dist, pick_scene,
+                            scene_front_dist)
+
 MAX_HITS = 50
 HIT_EMIT_EVERY = 3   # points 约 2.5 Hz → 命中约 0.8 Hz（区间 1-2 Hz 内）
 
@@ -62,7 +66,9 @@ def first_hit_dist(hits, x, y):
 class TimelineAdapter:
     """把 live_bridge 的行流转换成 timeline 消息。有状态：记住最近位姿与降频计数。"""
 
-    def __init__(self, front_dist=3.0, half_angle=0.5, hit_every=HIT_EMIT_EVERY):
+    def __init__(self, front_dist=3.0, half_angle=0.5, hit_every=HIT_EMIT_EVERY,
+                 traj_points=None, planner_limits=None,
+                 use_planner_front_dist=None):
         self.front_dist = front_dist
         self.half_angle = half_angle
         self.hit_every = hit_every
@@ -74,6 +80,40 @@ class TimelineAdapter:
         self.lookahead = None
         self.carrot = None
         self._carrot_local = None
+        # T3.4：按轨迹点属性分档的前视距离（未传 traj_points 时完全沿用固定值）
+        self._planner_limits = planner_limits or PlannerLimits()
+        self._scene_matcher = None
+        if traj_points and use_planner_front_dist is not False:
+            m = TrajectorySceneMatcher(traj_points, self._planner_limits)
+            if len(m):
+                self._scene_matcher = m
+        self._current_scene = None
+        self._current_front_dist = None
+        self._prev_pose_t = None   # (t, yaw)
+
+    def _update_scene(self, obj, x, y):
+        """优先用 live_bridge 直推的属性/场景，否则按位姿匹配轨迹最近点。"""
+        flags = obj.get("point_flags")
+        if isinstance(flags, dict):
+            scene = pick_scene(flags.get("curve_paths", 0),
+                               flags.get("turnAround", flags.get("turn_around", 0)),
+                               flags.get("bypass", 0))
+            self._current_scene = scene
+            self._current_front_dist = scene_front_dist(self._planner_limits, scene)
+            return
+        if isinstance(obj.get("scene"), str):
+            scene = obj["scene"]
+            self._current_scene = scene
+            self._current_front_dist = scene_front_dist(self._planner_limits, scene)
+            return
+        if self._scene_matcher is None:
+            return
+        r = self._scene_matcher.match(x, y)
+        if r is None:
+            self._current_scene = None
+            self._current_front_dist = None
+        else:
+            _, self._current_scene, self._current_front_dist = r
 
     def feed(self, obj):
         """输入一条 live_bridge JSON 对象，返回 timeline 消息列表（可能为空）。"""
@@ -107,6 +147,19 @@ class TimelineAdapter:
         if "x" not in obj:
             return []
         self.pose = (obj["x"], obj["y"], obj.get("yaw", 0.0))
+        self._update_scene(obj, obj["x"], obj["y"])
+        # 角速度：优先上游给的，否则由相邻帧 yaw 差估算（首帧 0）
+        t_now = obj.get("t")
+        yaw_now = float(obj.get("yaw", 0.0))
+        omega = obj.get("angular_vel")
+        if omega is None:
+            omega = 0.0
+            if self._prev_pose_t is not None and t_now is not None:
+                dt = float(t_now) - self._prev_pose_t[0]
+                if dt > 1e-3:
+                    omega = yaw_diff(yaw_now, self._prev_pose_t[1]) / dt
+        if t_now is not None:
+            self._prev_pose_t = (float(t_now), yaw_now)
         carrot = obj.get("carrot", self.carrot)
         if carrot is None and self._carrot_local is not None:
             cx, cy = self._carrot_local
@@ -123,6 +176,12 @@ class TimelineAdapter:
             "carrot": carrot,
             "front_hits": obj.get("front_hits"),
         }
+        # 理论 lookahead（真实公式）；绝不覆盖实测的 frame["lookahead"]
+        frame["lookahead_expected"] = round(compute_lookahead_dist(
+            self._planner_limits, obj.get("speed", 0.0), omega), 4)
+        if self._current_scene:
+            frame["scene"] = self._current_scene
+            frame["front_dist"] = round(self._current_front_dist or 0.0, 3)
         # progress 属 status 语义，单独发一条便于 UI 进度条
         msgs = [{"type": "frame", **frame}]
         if "progress" in obj:
@@ -137,9 +196,14 @@ class TimelineAdapter:
             return []
         x, y, yaw = self.pose
         pts = obj.get("pts") or []
-        hits = front_hits_from_points(pts, x, y, yaw,
-                                      self.front_dist, self.half_angle)
+        eff = (self._current_front_dist
+               if self._current_front_dist and self._current_front_dist > 0
+               else self.front_dist)
+        hits = front_hits_from_points(pts, x, y, yaw, eff, self.half_angle)
         msg = {"type": "front_hits", "t": obj.get("t", 0.0), "hits": hits}
+        if self._current_scene:
+            msg["front_dist"] = round(eff, 3)
+            msg["scene"] = self._current_scene
         d = first_hit_dist(hits, x, y)
         if d is not None:
             msg["first_hit_dist"] = d

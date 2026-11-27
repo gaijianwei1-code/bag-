@@ -2,6 +2,7 @@
 API 契约见 docs/bridge_api.md。启动：uvicorn app:app --host 0.0.0.0 --port 9100
 """
 import json
+import math
 import os
 import uuid
 import threading
@@ -129,6 +130,8 @@ def _sync_venue_to_container(venue: dict) -> dict:
         subprocess.run(["docker", "exec", container, "python3", "-c", fix_img_py],
                        check=True, capture_output=True, text=True, timeout=15)
     _cp(pcd, c_pcd)
+    import runner as _runner
+    _runner.ensure_container_pcd_xyzi(c_pcd, container=container)
     _cp(traj, c_traj)
     _cp(local_bag, c_bag)
 
@@ -370,6 +373,33 @@ def submit_run(req: RunRequest, x_bridge_token: Optional[str] = Header(None)):
     return {"run_id": run_id}
 
 
+def _resolve_run_traj_points(venue: dict, req: dict) -> list:
+    """T3.4：直播前视分档用的轨迹点。优先请求自带，其次场地档案轨迹；失败返回 []。"""
+    import json as _json
+    pts = (req.get("traj_json") or {}).get("points") if isinstance(
+        req.get("traj_json"), dict) else None
+    if isinstance(pts, list) and pts:
+        return pts
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cands = []
+    for b in venue.get("bags") or []:
+        if isinstance(b, dict) and b.get("bag") == req.get("bag") and b.get("traj"):
+            cands.append(b["traj"])
+    if venue.get("default_traj"):
+        cands.append(venue["default_traj"])
+    for c in cands:
+        p = c if os.path.isabs(c) else os.path.join(repo, c)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                d = _json.load(f)
+            pts = d.get("points") if isinstance(d, dict) else d
+            if isinstance(pts, list) and pts:
+                return pts
+        except (OSError, ValueError):
+            continue
+    return []
+
+
 def _execute_run(run_id: str, venue: dict, req: dict) -> None:
     """后台执行 run；把 runner 的状态回调写进 _runs（WS 侧读取）。
 
@@ -397,6 +427,9 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
                 if r["frames"]:
                     r["frames"][-1]["front_hits"] = msg.get("hits")
                     r["frames"][-1]["first_hit_dist"] = msg.get("first_hit_dist")
+                    for k in ("front_dist", "scene"):
+                        if k in msg:
+                            r["frames"][-1][k] = msg[k]
             elif t == "path":
                 r["path"] = msg.get("path")
             elif t == "obstacles":
@@ -423,8 +456,18 @@ def _execute_run(run_id: str, venue: dict, req: dict) -> None:
             wait_for_ros(timeout_s=30)
             if stop_wait.is_set():
                 return
+            from planner_limits import load_planner_limits
+            limits = load_planner_limits(
+                overrides=req.get("param_overrides"),
+                param_changes=req.get("param_changes"))
             live = LiveStream(run_id, duration=float(req.get("duration_s") or 120),
-                              line="B", on_message=on_message)
+                              line="B",
+                              front_dist=float(req.get("front_dist") or 3.0),
+                              half_angle=math.radians(
+                                  float(req.get("half_angle_deg") or 28.6)),
+                              on_message=on_message,
+                              traj_points=_resolve_run_traj_points(venue, req),
+                              planner_limits=limits)
             live.start()
 
         def _status(state, progress, msg):

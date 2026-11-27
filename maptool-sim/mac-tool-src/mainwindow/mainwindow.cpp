@@ -170,107 +170,11 @@ MainWindow::MainWindow(QWidget *parent)
                     QStringLiteral("dev-token"), this);
                 // T4.2 L2 分段重跑：读取地图上「点选点(选定开始/结束点)」选中的轨迹区间
                 regressionPanel->setSegmentPicker([this](int& fromIdx, int& toIdx, int& totalPoints) -> bool {
-                    eraseNullptr_pointSelected_line();
-                    if (pointSelected_line.isEmpty()) return false;
-                    BPathItem* pathItem = nullptr;
-                    for (const auto& ptr : pointSelected_line) {
-                        if (ptr && ptr->parentItem()) {
-                            pathItem = dynamic_cast<BPathItem*>(ptr->parentItem());
-                            if (pathItem) break;
-                        }
-                    }
-                    if (!pathItem) return false;
-                    totalPoints = pathItem->pointsNumber();
-                    int minIdx = totalPoints, maxIdx = -1;
-                    for (int i = 0; i < totalPoints; ++i) {
-                        BPointItem* pt = pathItem->getElement(i);
-                        for (const auto& sel : pointSelected_line) {
-                            if (sel.data() == pt) {
-                                if (i < minIdx) minIdx = i;
-                                if (i > maxIdx) maxIdx = i;
-                                break;
-                            }
-                        }
-                    }
-                    if (maxIdx < 0 || minIdx > maxIdx) return false;
-                    fromIdx = minIdx;
-                    toIdx = maxIdx;
-                    return true;
+                    return pickSelectedSegmentRange(fromIdx, toIdx, totalPoints);
                 });
                 // 画布修改后的轨迹实时导出，直接送入仿真复跑
                 regressionPanel->setTrajectoryExporter([this]() -> QJsonObject {
-                    QJsonObject out;
-                    if (!pgmScene || !pgmPixmapItem || resolution <= 0.0) return out;
-                    BPathItem* activePath = nullptr;
-                    for (BPathItem* p : m_path_list) {
-                        if (p && p->scene() == pgmScene && p->pointsNumber() >= 2) {
-                            activePath = p;
-                            break;
-                        }
-                    }
-                    if (!activePath && m_path && m_path->scene() == pgmScene && m_path->pointsNumber() >= 2)
-                        activePath = m_path;
-                    if (!activePath) return out;
-
-                    const int pgmH = pgmPixmapItem->pixmap().height();
-                    const int n = activePath->pointsNumber();
-                    QJsonArray ptsArr;
-                    for (int i = 0; i < n; ++i) {
-                        BPointItem* pt = activePath->getElement(i);
-                        if (!pt) continue;
-                        const QPointF pix = pt->getPoint();
-                        const double wx = pix.x() * resolution + origin_x;
-                        const double wy = (pgmH - 1 - pix.y()) * resolution + origin_y;
-                        double yaw = pt->yaw();
-                        BPointItem* pA = (i + 1 < n) ? pt : activePath->getElement(i - 1);
-                        BPointItem* pB = (i + 1 < n) ? activePath->getElement(i + 1) : pt;
-                        if (pA && pB) {
-                            const QPointF dp = pB->getPoint() - pA->getPoint();
-                            if (std::hypot(dp.x(), dp.y()) > 1e-3)
-                                yaw = std::atan2(-dp.y(), dp.x());
-                        }
-                        QJsonObject po;
-                        po["x"] = wx;
-                        po["y"] = wy;
-                        po["yaw"] = yaw;
-                        po["pixel_x"] = pix.x();
-                        po["pixel_y"] = pix.y();
-                        if (auto* attr = pt->attr) {
-                            po["road_id"] = attr->road_id;
-                            po["road_width"] = attr->road_width;
-                            po["bypass"] = attr->bypass;
-                            po["seismic"] = attr->seismic;
-                            po["turnAround"] = attr->turnAround;
-                            po["trash"] = attr->trash;
-                            po["charge"] = attr->charge;
-                            po["back"] = attr->back;
-                            po["clean_flag"] = attr->clean_flag;
-                            po["parking_area"] = attr->parking_area;
-                            po["curve_paths"] = attr->curve_paths;
-                            po["ignore_obstacles"] = attr->ignore_obstacles;
-                            po["reverse_traj"] = attr->reverse_traj;
-                            for (const auto& pair : attr->self_define) {
-                                bool ok = false;
-                                int val = pair.second.toInt(&ok);
-                                po[pair.first] = ok ? QJsonValue(val) : QJsonValue(pair.second);
-                            }
-                        } else {
-                            po["bypass"] = 1;
-                            po["road_id"] = 1;
-                            po["back"] = 0;
-                            po["clean_flag"] = 0;
-                            po["force_pass"] = 0;
-                            po["ignore_obstacles"] = 0;
-                            po["localization_mode"] = 0;
-                            po["reverse_traj"] = 0;
-                            po["turnAround"] = 0;
-                        }
-                        ptsArr.append(po);
-                    }
-                    if (ptsArr.size() < 2) return out;
-                    out["points"] = ptsArr;
-                    out["post_process"] = 0;
-                    return out;
+                    return exportActiveCanvasTrajectory();
                 });
                 // 提交成功后自动展开直播面板并自动连接直播
                 connect(regressionPanel, &RegressionPanel::newVenueRequested, this, [this]() {
@@ -315,6 +219,44 @@ MainWindow::MainWindow(QWidget *parent)
                 ui->statusbar->showMessage(tr("新场地已保存：%1").arg(vid), 6000);
             });
             wiz.exec();
+        });
+    }
+
+    //===== 轨迹段同步工具 =====
+    {
+        QAction* trajSyncAct = new QAction(tr("轨迹段同步"), this);
+        trajSyncAct->setObjectName("doTrajSync");
+        trajSyncAct->setToolTip(tr("将源轨迹某一段的位置与属性批量同步到其他轨迹 JSON"));
+        if (ui->menu_4) {
+            ui->menu_4->addSeparator();
+            ui->menu_4->addAction(trajSyncAct);
+        }
+        ui->toolBar_PathEdit->addAction(trajSyncAct);
+        connect(trajSyncAct, &QAction::triggered, this, [this]() {
+            if (!trajSyncDialog) {
+                trajSyncDialog = new TrajSyncDialog(this);
+                trajSyncDialog->setSegmentPicker([this](int& fromIdx, int& toIdx, int& totalPoints) -> bool {
+                    return pickSelectedSegmentRange(fromIdx, toIdx, totalPoints);
+                });
+                trajSyncDialog->setCanvasExporter([this]() -> QJsonObject {
+                    return exportActiveCanvasTrajectory();
+                });
+            }
+            QString defDir;
+            if (!ConstJson.isEmpty()) {
+                defDir = QFileInfo(ConstJson).absolutePath();
+            } else if (!ConstImage.isEmpty()) {
+                defDir = QFileInfo(ConstImage).absolutePath();
+            }
+            if (!defDir.isEmpty()) {
+                trajSyncDialog->setDefaultDir(defDir);
+            }
+            if (!ConstJson.isEmpty()) {
+                trajSyncDialog->setSourceFileIfEmpty(ConstJson);
+            }
+            trajSyncDialog->show();
+            trajSyncDialog->raise();
+            trajSyncDialog->activateWindow();
         });
     }
 
@@ -4649,5 +4591,111 @@ void MainWindow::on_do_kill_mapping_and_rosbag_Node_triggered()
 {
     killProcess(mappingProcess, "lslidar_mapping");
     killProcess(rosbagPlayProcess, "rosbag_play");
+}
+
+bool MainWindow::pickSelectedSegmentRange(int& fromIdx, int& toIdx, int& totalPoints)
+{
+    eraseNullptr_pointSelected_line();
+    if (pointSelected_line.isEmpty()) return false;
+    BPathItem* pathItem = nullptr;
+    for (const auto& ptr : pointSelected_line) {
+        if (ptr && ptr->parentItem()) {
+            pathItem = dynamic_cast<BPathItem*>(ptr->parentItem());
+            if (pathItem) break;
+        }
+    }
+    if (!pathItem) return false;
+    totalPoints = pathItem->pointsNumber();
+    int minIdx = totalPoints, maxIdx = -1;
+    for (int i = 0; i < totalPoints; ++i) {
+        BPointItem* pt = pathItem->getElement(i);
+        for (const auto& sel : pointSelected_line) {
+            if (sel.data() == pt) {
+                if (i < minIdx) minIdx = i;
+                if (i > maxIdx) maxIdx = i;
+                break;
+            }
+        }
+    }
+    if (maxIdx < 0 || minIdx > maxIdx) return false;
+    fromIdx = minIdx;
+    toIdx = maxIdx;
+    return true;
+}
+
+QJsonObject MainWindow::exportActiveCanvasTrajectory() const
+{
+    QJsonObject out;
+    if (!pgmScene || !pgmPixmapItem || resolution <= 0.0) return out;
+    BPathItem* activePath = nullptr;
+    for (BPathItem* p : m_path_list) {
+        if (p && p->scene() == pgmScene && p->pointsNumber() >= 2) {
+            activePath = p;
+            break;
+        }
+    }
+    if (!activePath && m_path && m_path->scene() == pgmScene && m_path->pointsNumber() >= 2)
+        activePath = m_path;
+    if (!activePath) return out;
+
+    const int pgmH = pgmPixmapItem->pixmap().height();
+    const int n = activePath->pointsNumber();
+    QJsonArray ptsArr;
+    for (int i = 0; i < n; ++i) {
+        BPointItem* pt = activePath->getElement(i);
+        if (!pt) continue;
+        const QPointF pix = pt->getPoint();
+        const double wx = pix.x() * resolution + origin_x;
+        const double wy = (pgmH - 1 - pix.y()) * resolution + origin_y;
+        double yaw = pt->yaw();
+        BPointItem* pA = (i + 1 < n) ? pt : activePath->getElement(i - 1);
+        BPointItem* pB = (i + 1 < n) ? activePath->getElement(i + 1) : pt;
+        if (pA && pB) {
+            const QPointF dp = pB->getPoint() - pA->getPoint();
+            if (std::hypot(dp.x(), dp.y()) > 1e-3)
+                yaw = std::atan2(-dp.y(), dp.x());
+        }
+        QJsonObject po;
+        po["x"] = wx;
+        po["y"] = wy;
+        po["yaw"] = yaw;
+        po["pixel_x"] = pix.x();
+        po["pixel_y"] = pix.y();
+        if (auto* attr = pt->attr) {
+            po["road_id"] = attr->road_id;
+            po["road_width"] = attr->road_width;
+            po["bypass"] = attr->bypass;
+            po["seismic"] = attr->seismic;
+            po["turnAround"] = attr->turnAround;
+            po["trash"] = attr->trash;
+            po["charge"] = attr->charge;
+            po["back"] = attr->back;
+            po["clean_flag"] = attr->clean_flag;
+            po["parking_area"] = attr->parking_area;
+            po["curve_paths"] = attr->curve_paths;
+            po["ignore_obstacles"] = attr->ignore_obstacles;
+            po["reverse_traj"] = attr->reverse_traj;
+            for (const auto& pair : attr->self_define) {
+                bool ok = false;
+                int val = pair.second.toInt(&ok);
+                po[pair.first] = ok ? QJsonValue(val) : QJsonValue(pair.second);
+            }
+        } else {
+            po["bypass"] = 1;
+            po["road_id"] = 1;
+            po["back"] = 0;
+            po["clean_flag"] = 0;
+            po["force_pass"] = 0;
+            po["ignore_obstacles"] = 0;
+            po["localization_mode"] = 0;
+            po["reverse_traj"] = 0;
+            po["turnAround"] = 0;
+        }
+        ptsArr.append(po);
+    }
+    if (ptsArr.size() < 2) return out;
+    out["points"] = ptsArr;
+    out["post_process"] = 0;
+    return out;
 }
 

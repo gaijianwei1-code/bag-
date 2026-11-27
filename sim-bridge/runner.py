@@ -64,6 +64,11 @@ _STALE_PATTERNS = (
     "sim/scripts/lookahead_observer.py",
     "devel/lib/sweep_base/sweep_base_node",
     "bag_replay.py",
+    # 2026-11-26：bag_replay_diff.py 在两臂跑完后会挂死不退，内存从 1.1 GB 涨到
+    # 4.6 GB（被 OOM 撸到 RSS=0）且不写 compare.json；它不在原 pattern 里，不会被
+    # 自动清掉。加进来让 preflight / 超时收尾都能顺手带走。
+    "bag_replay_diff.py",
+    "b_line_analyze.py",
     "b_line_run.py",
     "roslaunch",
     "rosmaster",
@@ -370,6 +375,9 @@ def _prepare_segment_scene(base_scene_path, segment, run_id,
         f"run_id = {run_id!r}\n"
         "with open(base_scene, 'r', encoding='utf-8') as f:\n"
         "    scene = yaml.safe_load(f) or {}\n"
+         "map_dir = scene.get('map_dir') or ''\n"
+         "if map_dir and os.path.isdir(map_dir):\n"
+         "    out_traj = os.path.join(map_dir, 'blz_seg_traj_' + run_id + '.json')\n"
         "base_traj_path = scene.get('trajectory') or '/root/catkin_ws/scenes/scenario_1793346971223/1793347176294.json'\n"
         "traj_path = custom_path or base_traj_path\n"
         "with open(traj_path, 'r', encoding='utf-8') as f:\n"
@@ -445,6 +453,284 @@ def _prepare_segment_scene(base_scene_path, segment, run_id,
         detail = (data or {}).get("detail") or (err or out or "")[-300:]
         raise RunError(code, detail)
     return data
+
+
+# ---------- 0.5 PCD 兼容：virtual_lidar 只吃 x y z intensity 四字段 ----------
+def convert_pcd_xyz_to_xyzi_file(path, max_points=1_000_000, voxel_size=0.10):
+    """把 3 字段 binary PCD（x y z）原地补成 4 字段（intensity=0），并在点数超限时做体素降采样。幂等。
+
+    2026-11-24 事故：
+      1) 南岸晶都 PCD 只有 x y z，virtual_lidar.load_world 抛 `unexpected PCD fields`，雷达 0 帧；
+      2) 南岸晶都 PCD 有 1370 万点，纯 Python virtual_lidar 掉到 1.6 Hz 致 25s 回放超时 600s。
+    """
+    import math as _math
+    try:
+        import numpy as np
+    except ImportError:   # 宿主机 venv 无 numpy：纯 Python 回退（仅小文件/单测）
+        np = None
+    with open(path, "rb") as f:
+        blob = f.read()
+    idx = blob.find(b"DATA binary")
+    if idx < 0:
+        raise RunError("PCD_NOT_BINARY", path)
+    nl = blob.find(b"\n", idx)
+    header = blob[:nl + 1].decode("ascii", errors="ignore")
+    meta = {}
+    for line in header.splitlines():
+        parts = line.split()
+        if parts:
+            meta[parts[0]] = parts[1:]
+    fields = meta.get("FIELDS")
+    n = int(meta["POINTS"][0])
+    need_convert = False
+    if fields == ["x", "y", "z", "intensity"]:
+        if n <= max_points:
+            return {"converted": False, "downsampled": False, "points": n}
+        stride = 16
+    elif (fields == ["x", "y", "z"] and meta.get("SIZE") == ["4", "4", "4"]
+          and meta.get("TYPE") == ["F", "F", "F"]):
+        need_convert = True
+        stride = 12
+    else:
+        raise RunError("PCD_FIELDS_UNSUPPORTED", f"{fields} {meta.get('SIZE')} {meta.get('TYPE')}")
+
+    body = blob[nl + 1:nl + 1 + n * stride]
+    if len(body) < n * stride:
+        raise RunError("PCD_TRUNCATED", f"{len(body)} < {n * stride}")
+
+    downsampled = False
+    out_n = n
+    if np is not None:
+        if need_convert:
+            xyz = np.frombuffer(body, dtype="<f4").reshape(n, 3)
+            out = np.zeros((n, 4), dtype="<f4")
+            out[:, :3] = xyz
+        else:
+            out = np.frombuffer(body, dtype="<f4").reshape(n, 4).copy()
+        if max_points and len(out) > max_points:
+            # 1D int64 体素哈希去重（1370 万点约 1~2 秒）
+            vs = float(voxel_size) if voxel_size and voxel_size > 0 else 0.10
+            finite = np.isfinite(out[:, :3]).all(axis=1)
+            out = out[finite]
+            gx = np.floor(out[:, 0] / vs).astype(np.int64) + 100000
+            gy = np.floor(out[:, 1] / vs).astype(np.int64) + 100000
+            gz = np.floor(out[:, 2] / vs).astype(np.int64) + 100000
+            keys = (gx << 40) | ((gy & 0xFFFFF) << 20) | (gz & 0xFFFFF)
+            _, keep_idx = np.unique(keys, return_index=True)
+            out = out[np.sort(keep_idx)]
+            if len(out) > max_points:
+                step = max(2, int(_math.ceil(len(out) / float(max_points))))
+                out = out[::step]
+            out_n = len(out)
+            downsampled = True
+        out_bytes = out.tobytes()
+    else:
+        if need_convert:
+            buf = bytearray()
+            zero = b"\x00\x00\x00\x00"
+            for i in range(n):
+                buf += body[i * 12:(i + 1) * 12] + zero
+            out_bytes = bytes(buf)
+        else:
+            out_bytes = body
+        if max_points and n > max_points:
+            step = max(2, int(_math.ceil(n / float(max_points))))
+            buf = bytearray()
+            for i in range(0, n, step):
+                buf += out_bytes[i * 16:(i + 1) * 16]
+            out_bytes = bytes(buf)
+            out_n = len(out_bytes) // 16
+            downsampled = True
+
+    new_header = ("# .PCD v0.7 - Point Cloud Data file format\n"
+                  "VERSION 0.7\n"
+                  "FIELDS x y z intensity\n"
+                  "SIZE 4 4 4 4\n"
+                  "TYPE F F F F\n"
+                  "COUNT 1 1 1 1\n"
+                  f"WIDTH {out_n}\n"
+                  "HEIGHT 1\n"
+                  "VIEWPOINT 0 0 0 1 0 0 0\n"
+                  f"POINTS {out_n}\n"
+                  "DATA binary\n")
+    tmp = path + ".xyzi.tmp"
+    with open(tmp, "wb") as f:
+        f.write(new_header.encode("ascii"))
+        f.write(out_bytes)
+    os.replace(tmp, path)
+    return {"converted": need_convert, "downsampled": downsampled,
+            "points_before": n, "points": out_n}
+
+
+def ensure_container_pcd_xyzi(pcd_path, container=None, max_points=1_000_000, voxel_size=0.10):
+    """在容器内对 pcd_path 执行 convert_pcd_xyz_to_xyzi_file（同一份源码，经 stdin 注入）。"""
+    import inspect
+    cont = container or CONTAINER
+    src = ("import os, json, sys\n"
+           "class RunError(Exception):\n"
+           "    def __init__(self, code, detail=''):\n"
+           "        super().__init__(code + ': ' + detail)\n"
+           + inspect.getsource(convert_pcd_xyz_to_xyzi_file)
+           + f"\nprint(json.dumps(convert_pcd_xyz_to_xyzi_file({pcd_path!r}, max_points={max_points!r}, voxel_size={voxel_size!r})))\n")
+    p = subprocess.run(["docker", "exec", "-i", cont, "python3", "-"],
+                       input=src, capture_output=True, text=True, timeout=300)
+    lines = [ln for ln in (p.stdout or "").splitlines() if ln.strip().startswith("{")]
+    if p.returncode != 0 or not lines:
+        raise RunError("PCD_CONVERT_FAILED", (p.stderr or p.stdout or "")[-300:])
+    return json.loads(lines[-1])
+
+
+# ---------- 0.6 world 点云与 PGM 底图一致性裁剪（2026-11-26 najd1 卡点根因） ----------
+# 现象：车在 (10.54, 0.91) 反复 [CollisionCheck]，但该处 PGM=255（自由）、
+#       world 点云 1 m 内无 z>0.15 的点、实车 global costmap 判自由。
+# 根因：world 点云里有大量「飞点/玻璃反射/离群低点」，落在 PGM 明确判自由的区域，
+#       经 RayGroundFilter → /points_no_ground → local_obstacle_layer 标成致命障碍，
+#       再被 pursuit 的 footprint 预测轮廓命中 → 停车。
+# 实测：把 world 只保留「距 PGM 占据格 ≤ 0.30 m」的点后，同一参数、同一 89 s 包，
+#       travel 10.96 m → 19.39 m，goal_count 22 → 87+，原卡点消失。
+# 注意：这不是放宽碰撞检测；被删的点在 PGM 里本就是自由区，实车 costmap 也判自由。
+
+def crop_pcd_to_map_occupied(pcd_path, pgm_path, origin_x, origin_y, resolution,
+                             max_dist_m=0.30, out_path=None):
+    """只保留距 PGM 占据格 ≤ max_dist_m 的 world 点，消除地图与点云不一致造成的假障碍。
+
+    PCD 支持 x y z / x y z intensity 的 binary 形式；PGM 支持 P5。
+    返回 {points_before, points, kept_ratio, max_dist_m, out}。
+    """
+    import numpy as np
+    with open(pcd_path, "rb") as f:
+        blob = f.read()
+    idx = blob.find(b"DATA binary")
+    if idx < 0:
+        raise RunError("PCD_NOT_BINARY", pcd_path)
+    nl = blob.find(b"\n", idx)
+    meta = {}
+    for line in blob[:nl].decode("ascii", errors="ignore").splitlines():
+        parts = line.split()
+        if parts:
+            meta[parts[0]] = parts[1:]
+    fields = meta.get("FIELDS") or []
+    n = int(meta["POINTS"][0])
+    stride = 4 * len(fields)
+    body = blob[nl + 1:nl + 1 + n * stride]
+    if len(body) < n * stride:
+        raise RunError("PCD_TRUNCATED", f"{len(body)} < {n * stride}")
+    rows = np.frombuffer(body, dtype="<f4").reshape(n, len(fields))
+    xyz = rows[:, :3]
+
+    with open(pgm_path, "rb") as f:
+        head = f.read(2)
+        if head[:2] != b"P5":
+            raise RunError("PGM_NOT_BINARY", pgm_path)
+        vals = []
+        while len(vals) < 3:
+            line = f.readline()
+            if not line:
+                raise RunError("PGM_TRUNCATED", pgm_path)
+            if line.startswith(b"#"):
+                continue
+            vals.extend(line.split())
+        w, h = int(vals[0]), int(vals[1])
+        raw = f.read(w * h)
+    if len(raw) < w * h:
+        raise RunError("PGM_TRUNCATED", f"{len(raw)} < {w * h}")
+    grid = np.frombuffer(raw, dtype=np.uint8).reshape(h, w)
+    occ = grid < 100
+
+    k = max(0, int(round(float(max_dist_m) / float(resolution))))
+    near = occ.copy()
+    for _ in range(k):
+        e = near.copy()
+        e[1:, :] |= near[:-1, :]
+        e[:-1, :] |= near[1:, :]
+        e[:, 1:] |= near[:, :-1]
+        e[:, :-1] |= near[:, 1:]
+        near = e
+
+    c = np.floor((xyz[:, 0] - float(origin_x)) / float(resolution)).astype(np.int64)
+    r = (h - 1 - np.floor((xyz[:, 1] - float(origin_y)) / float(resolution))).astype(np.int64)
+    ok = (c >= 0) & (c < w) & (r >= 0) & (r < h)
+    keep = np.zeros(n, dtype=bool)
+    keep[ok] = near[r[ok], c[ok]]
+
+    out = np.ascontiguousarray(rows[keep])
+    out_n = len(out)
+    header = ("# .PCD v0.7 - Point Cloud Data file format\nVERSION 0.7\n"
+              f"FIELDS {' '.join(fields)}\n"
+              f"SIZE {' '.join(['4'] * len(fields))}\n"
+              f"TYPE {' '.join(['F'] * len(fields))}\n"
+              f"COUNT {' '.join(['1'] * len(fields))}\n"
+              f"WIDTH {out_n}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\n"
+              f"POINTS {out_n}\nDATA binary\n")
+    dst = out_path or pcd_path
+    tmp = dst + ".crop.tmp"
+    with open(tmp, "wb") as f:
+        f.write(header.encode("ascii"))
+        f.write(out.astype("<f4").tobytes())
+    os.replace(tmp, dst)
+    return {"points_before": int(n), "points": int(out_n),
+            "kept_ratio": round(float(out_n) / max(1, n), 4),
+            "max_dist_m": float(max_dist_m), "out": dst}
+
+
+def prepare_world_consistent_scene(venue, run_id, scene_path):
+    """按场地档案的 world_map_consistency 配置，生成一份 world 已裁剪的 scene YAML。
+
+    未开启该配置时原样返回 scene_path。
+    """
+    cfg = venue.get("world_map_consistency") or {}
+    if not cfg.get("enabled"):
+        return scene_path, None
+    import inspect
+    c = venue.get("container") or {}
+    world = c.get("world")
+    map_dir = c.get("map_dir")
+    if not world or not map_dir:
+        return scene_path, None
+    ref = venue.get("map_pose_ref") or {}
+    origin = ref.get("origin") or {}
+    res = ref.get("resolution")
+    if res is None:
+        return scene_path, None
+    max_dist = float(cfg.get("max_dist_m", 0.30))
+    out_pcd = f"{map_dir}/map_worldmap.pcd"
+    out_scene = scene_path.replace(".yaml", "_worldmap.yaml")
+    if out_scene == scene_path:
+        out_scene = scene_path + ".worldmap.yaml"
+
+    src = ("import json, sys, os, yaml\n"
+           "class RunError(Exception):\n"
+           "    def __init__(self, code, detail=''):\n"
+           "        super().__init__(code + ': ' + detail)\n"
+           + inspect.getsource(crop_pcd_to_map_occupied) + "\n"
+           f"map_dir = {map_dir!r}\n"
+           "map_yaml = os.path.join(map_dir, 'map.yaml')\n"
+           "image = 'map.pgm'\n"
+           "try:\n"
+           "    image = (yaml.safe_load(open(map_yaml)) or {}).get('image') or image\n"
+           "except Exception:\n"
+           "    pass\n"
+           f"stats = crop_pcd_to_map_occupied({world!r}, os.path.join(map_dir, image),\n"
+           f"    {float(origin.get('x', 0.0))!r}, {float(origin.get('y', 0.0))!r}, {float(res)!r},\n"
+           f"    max_dist_m={max_dist!r}, out_path={out_pcd!r})\n"
+           f"scene = yaml.safe_load(open({scene_path!r})) or {{}}\n"
+           f"scene['world'] = {out_pcd!r}\n"
+           f"scene['world_source'] = 'world PCD 与 PGM 一致性裁剪（%g m）' % {max_dist!r}\n"
+           f"scene['scene_id'] = str(scene.get('scene_id', 'scene')) + '_worldmap'\n"
+           f"with open({out_scene!r}, 'w') as f:\n"
+           "    yaml.safe_dump(scene, f, allow_unicode=True, sort_keys=False)\n"
+           f"print(json.dumps(dict(ok=True, stats=stats, scene={out_scene!r})))\n")
+    rc, out, err = _exec(f"python3 -c {shlex.quote(src)}", timeout=600, check=False)
+    lines = [ln for ln in (out or "").splitlines() if ln.strip().startswith("{")]
+    data = None
+    if lines:
+        try:
+            data = json.loads(lines[-1])
+        except ValueError:
+            data = None
+    if rc != 0 or not data or not data.get("ok"):
+        raise RunError("WORLD_MAP_CROP_FAILED", (err or out or "")[-400:])
+    return data["scene"], data.get("stats")
 
 
 def _prepare_param_set_with_overrides(base_ps, new_ps, overrides=None, changes=None):
@@ -669,6 +955,7 @@ def submit(venue, req, run_id, on_status=None):
     status("queued", 0.15, "建分支快照 worktree")
     wt, commit = make_worktree(req.get("branch", "main"), req.get("commit"))
     tmp_ps = None
+    segment_info = None
 
     try:
         status("queued", 0.25, "构建 bag_replay 参数")
@@ -693,6 +980,19 @@ def submit(venue, req, run_id, on_status=None):
                 args[scene_idx] = segment_info["scene_path"]
                 args[dur_idx] = str(int(segment_info["duration_s"]))
                 init_pose = segment_info["init_pose"]
+        # world 与 PGM 一致性裁剪（场地档案 world_map_consistency.enabled 时才生效）
+        world_consistency = None
+        scene_idx = args.index("--scene") + 1
+        new_scene, wc_stats = prepare_world_consistent_scene(
+            venue, run_id, args[scene_idx])
+        if wc_stats:
+            args[scene_idx] = new_scene
+            world_consistency = wc_stats
+            if segment_info:
+                segment_info = dict(segment_info)
+                segment_info["scene_path"] = new_scene
+                segment_info["world_consistency"] = wc_stats
+
         overrides = req.get("param_overrides") or {}
         changes = req.get("param_changes") or []
         param_meta = {"param_set_id": candidate_ps, "changes": [], "param_plan": []}
@@ -759,6 +1059,7 @@ def submit(venue, req, run_id, on_status=None):
                 "param_changes": param_meta.get("changes", []),
                 "param_plan": param_meta.get("param_plan", []),
                 "segment_info": segment_info,
+                "world_consistency": world_consistency,
                 "preflight": preflight_info,
                 "disk_guard": disk_guard}
     finally:
@@ -768,6 +1069,11 @@ def submit(venue, req, run_id, on_status=None):
         # 铁律（2026-11-24 事故）：无论成功、失败、超时还是抛异常，
         # 必须杀掉本轮残留的 rosbag record 与仿真节点，否则会持续写盘到撑爆磁盘。
         kill_stale_sim_procs("all")
+        if segment_info:
+            for key in ("traj_path", "scene_path"):
+                p = str(segment_info.get(key) or "")
+                if os.path.basename(p).startswith(("blz_seg_traj_", "blz_seg_scene_")):
+                    _exec(f"rm -f {shlex.quote(p)}", timeout=15, check=False)
         cleanup_worktree(wt)
 
 

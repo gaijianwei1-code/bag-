@@ -22,7 +22,9 @@ class LiveStream:
     """一次 run 的直播流。start() 后在后台线程持续产出行，调用方消费 messages。"""
 
     def __init__(self, run_id, duration, line="B", front_dist=3.0, half_angle=0.5,
-                 on_message=None):
+                 on_message=None, traj_points=None, planner_limits=None):
+        self.traj_points = traj_points
+        self.planner_limits = planner_limits
         self.run_id = run_id
         self.duration = duration
         self.line = line
@@ -39,7 +41,9 @@ class LiveStream:
 
     def start(self):
         from live_adapter import TimelineAdapter
-        self._adapter = TimelineAdapter(self.front_dist, self.half_angle)
+        self._adapter = TimelineAdapter(self.front_dist, self.half_angle,
+                                  traj_points=self.traj_points,
+                                  planner_limits=self.planner_limits)
         src = ("source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
                "source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
                f"export ROS_MASTER_URI={ROS_MASTER_URI}; ")

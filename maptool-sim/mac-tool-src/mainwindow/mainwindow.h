@@ -58,6 +58,7 @@
 #include "live_layer.h"
 #include "regression_panel.h"
 #include "venue_wizard.h"
+#include "../dialog/traj_sync_dialog.h"
 
 #define WINDOW_TITLE "Map Tool"
 #define WINDOW_ERROR "Error - Map Tool"
@@ -131,6 +132,8 @@ private:
     bool isROSEnvironmentReady();
     bool startProcessWithLog(QProcess*&, const QString&, const QString&);
     void killProcess(QProcess*&, const QString&);
+    bool pickSelectedSegmentRange(int& fromIdx, int& toIdx, int& totalPoints);
+    QJsonObject exportActiveCanvasTrajectory() const;
 
 signals:
     void cleanLastSCP();
@@ -307,6 +310,7 @@ private:
     FovLayer *fovLayer = nullptr;
     LiveLayer *liveLayer = nullptr;       // T2.4 直播跟车
     RegressionPanel *regressionPanel = nullptr;  // T4.1 回归面板
+    QPointer<TrajSyncDialog> trajSyncDialog;     // 轨迹段属性/位置同步工具
     std::unique_ptr<blz::GridProjection> fovGrid;   //pcd 投影占据网格缓存
     std::unique_ptr<blz::GridProjection> pgmGrid;   //修过的 pgm 地图占据网格缓存
     void rebuildPgmGrid();

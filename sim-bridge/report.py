@@ -886,9 +886,16 @@ def _issues_section(crop: Optional[MapCrop], issues: Sequence[dict]) -> str:
         img = (f'<div class="imgwrap"><img src="{uri}" alt="frame {i}">'
                f'{overlay}</div>') if uri else \
               '<p class="muted">（该帧无法定位到地图范围）</p>'
+        la_txt = f"lookahead = {_fmt(f.get('lookahead'), 3)} m"
+        if f.get("lookahead_expected") is not None:
+            la_txt += f"（理论 {_fmt(f.get('lookahead_expected'), 3)} m）"
         kv = [f"t = {_fmt(f.get('t'), 2)} s",
               f"speed = {_fmt(f.get('speed'), 2)} m/s",
-              f"lookahead = {_fmt(f.get('lookahead'), 3)} m"]
+              la_txt]
+        if f.get("scene") or f.get("front_dist") is not None:
+            from planner_limits import scene_label
+            kv.append(f"前视档位 = {scene_label(f.get('scene'))} "
+                      f"({_fmt(f.get('front_dist'), 2)} m)")
         if f.get("carrot"):
             kv.append(f"carrot = ({_fmt(f['carrot'][0], 2)}, "
                       f"{_fmt(f['carrot'][1], 2)})")
@@ -1079,7 +1086,10 @@ def build_report(run_id: str, run: dict, venue: Optional[dict] = None,
 
     train_ts = (render_timeseries(frames, "speed", "#2563eb", "速度", "m/s")
                 + render_timeseries(frames, "lookahead", "#f59e0b",
-                                    "lookahead（前视距离）", "m"))
+                                    "lookahead（前视距离）", "m")
+                + '<p class="muted">口径：理论 lookahead = 2v × lookahead_time'
+                  '（有转向时 1.5 m，clamp 至 [1.0, 4.0] m），'
+                  '并非 yaml 中静态的 lookahead_dist: 1.5。</p>')
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">

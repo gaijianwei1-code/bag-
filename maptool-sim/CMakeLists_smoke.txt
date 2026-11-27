@@ -90,3 +90,10 @@ add_executable(test_live_ws core/tests/test_live_ws.cpp
 target_include_directories(test_live_ws PRIVATE
     core mac-tool-src mac-tool-src/mainwindow mac-tool-src/items mac-tool-src/dialog)
 target_link_libraries(test_live_ws Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::WebSockets)
+
+# ---- 轨迹段属性与位置同步单元测试 ----
+add_executable(test_traj_sync core/tests/test_traj_sync.cpp
+                              mac-tool-src/dialog/traj_sync_dialog.cpp)
+target_include_directories(test_traj_sync PRIVATE
+    core mac-tool-src/dialog)
+target_link_libraries(test_traj_sync Qt6::Core Qt6::Gui Qt6::Widgets)

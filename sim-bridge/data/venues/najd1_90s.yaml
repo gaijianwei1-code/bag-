@@ -1,0 +1,35 @@
+bags:
+- bag: bags/planner_90s.bag
+  container_bag: /root/bags/najd1/planner_90s.bag
+  duration_s: 89
+  local_bag: /root/bags/najd1/planner_90s.bag
+  notes: 南岸晶都前 89 秒子包（由 planner.bag 截取），供短时回归验证；原始 10 分钟包仍为 bags/planner.bag
+  traj: /Users/a11/地图轨迹/1119主路.json
+created: '2026-11-26'
+created_by: Antigravity
+default_param_set: t31_tol_1p0
+default_traj: /Users/a11/地图轨迹/1119主路.json
+local_bag: /root/bags/najd1/planner_90s.bag
+map_pcd: /Users/a11/地图轨迹/map_frames_no_ground.pcd
+map_pgm: /Users/a11/地图轨迹/南岸晶都/1791448885936.pgm
+map_pose_ref:
+  origin:
+    x: -66.43580351344403
+    y: -86.40450988933252
+  resolution: 0.05
+name: 南岸晶都（89s 短包）
+pcd_height_filter:
+  max: 2
+  min: 0.05
+schema: venue/v1
+venue_id: najd1_90s
+world_map_consistency:
+  enabled: true
+  max_dist_m: 0.3
+  notes: world 点云只保留距 PGM 占据格 ≤0.30 m 的点；消除飞点造成的假障碍（2026-11-26 卡点根因）
+container:
+  map_dir: /root/catkin_ws/scenes/najd1
+  bag: /root/bags/najd1/planner_90s.bag
+  trajectory: /root/catkin_ws/scenes/najd1/1119主路.json
+  world: /root/catkin_ws/scenes/najd1/map_frames_no_ground.pcd
+  scene_yaml: /root/catkin_ws/sim/scenes/venue_najd1.yaml

@@ -112,6 +112,14 @@ else
     bad "test_live_layer 失败"; grep -E "^FAIL" /tmp/blz_t4.log | head -5
 fi
 
+# ---------- 5.55 轨迹段同步单元测试 ----------
+step "5.55/8 test_traj_sync（起终点对齐 / 位置属性分离 / 备份往返）"
+if "$SMOKE_SRC/out/test_traj_sync" > /tmp/blz_t_sync.log 2>&1; then
+    ok "test_traj_sync PASS"
+else
+    bad "test_traj_sync 失败"; grep -E "^FAIL" /tmp/blz_t_sync.log | head -5
+fi
+
 # ---------- 5.6 直播跟车真实 WS 连接（补测「点连接直播没响应」）----------
 step "5.6/8 test_live_ws（真实 WS 握手 + 出帧 + 状态机）"
 RUN_ID=""

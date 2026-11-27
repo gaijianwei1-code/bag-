@@ -10,7 +10,7 @@ default_param_set: t31_tol_1p0
 default_traj: /Users/a11/地图轨迹/1119主路.json
 local_bag: /Users/a11/地图轨迹/2026-11-18_10_22_000/planner.bag
 map_pcd: /Users/a11/地图轨迹/map_frames_no_ground.pcd
-map_pgm: /Users/a11/地图轨迹/map.pgm
+map_pgm: /Users/a11/地图轨迹/南岸晶都/1791448885936.pgm
 map_pose_ref:
   origin:
     x: -66.43580351344403
@@ -22,6 +22,10 @@ pcd_height_filter:
   min: 0.05
 schema: venue/v1
 venue_id: najd1
+world_map_consistency:
+  enabled: true
+  max_dist_m: 0.3
+  notes: 与 najd1_90s 同一份 world/PGM；world 只保留距 PGM 占据格 ≤0.30 m 的点（2026-11-26 卡点根因）
 container:
   map_dir: /root/catkin_ws/scenes/najd1
   bag: /root/bags/najd1/planner.bag

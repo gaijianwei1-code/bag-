@@ -24,6 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from live_adapter import front_hits_from_points  # noqa: E402
+from planner_limits import PlannerLimits, compute_lookahead_dist  # noqa: E402
 
 SRC = ("source /opt/ros/noetic/setup.bash >/dev/null 2>&1; "
        "source /root/catkin_ws/devel/setup.bash >/dev/null 2>&1; "
@@ -137,6 +138,8 @@ for s in samples:
 la_vals = [r["la"] for r in rows]
 print(f"  planner lookahead: min={min(la_vals):.3f} max={max(la_vals):.3f} "
       f"mean={sum(la_vals)/len(la_vals):.3f}")
+print(f"  理论公式 lookahead（直线 0.4 m/s）: "
+      f"{compute_lookahead_dist(PlannerLimits(), 0.4):.3f} m")
 n_cone = sum(1 for r in rows if r["carrot_in_cone"])
 n_hit = sum(1 for r in rows if r["l0_first_hit"] is not None)
 n_exceed = sum(1 for r in rows if r["la_exceeds_hit"])

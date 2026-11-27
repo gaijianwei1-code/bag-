@@ -58,6 +58,7 @@ set(SOURCES
     dialog/drawLine_PointsSelectedBased_Dialog.cpp
     dialog/rosbagplaydialog.cpp
     dialog/setFunctionalAreaName.cpp
+    dialog/traj_sync_dialog.cpp
     items/Graph.cpp
     items/GraphicsType.cpp
     dialog/aboutdialog.cpp
@@ -87,6 +88,7 @@ set(HEADERS
     dialog/drawLine_PointsSelectedBased_Dialog.h
     dialog/rosbagplaydialog.h
     dialog/setFunctionalAreaName.h
+    dialog/traj_sync_dialog.h
     items/Graph.h
     items/GraphicsType.h
     dialog/aboutdialog.h
